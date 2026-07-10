@@ -1,9 +1,6 @@
 {
   "domain": "smartpoolconnect_owner",
-  "name": "SmartPoolConnect Owner Portal",
-  "codeowners": [
-    "@DieterC1984"
-  ],
+  "name": "SmartPoolConnect Owner",
   "config_flow": true,
   "documentation": "https://github.com/DieterC1984/smartpoolconnect-owner",
   "integration_type": "device",

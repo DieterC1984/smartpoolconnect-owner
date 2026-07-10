@@ -1,5 +1,4 @@
 """Async client for SmartPoolConnect owner portal."""
-
 from __future__ import annotations
 
 import base64
@@ -34,7 +33,6 @@ class AuthenticationError(SmartPoolConnectError):
 @dataclass(slots=True)
 class PoolFilterSchedule:
     """Filter schedule configuration."""
-
     enabled: bool | None = None
     pump_speed: str | None = None
     start_time: str | None = None
@@ -45,7 +43,6 @@ class PoolFilterSchedule:
 @dataclass(slots=True)
 class PoolFilterSettings:
     """Filter pump configuration."""
-
     always_active: bool | None = None
     pump_speed: str | None = None
     schedule_1: PoolFilterSchedule | None = None
@@ -56,7 +53,6 @@ class PoolFilterSettings:
 @dataclass(slots=True)
 class PoolStatus:
     """Normalized pool status for Home Assistant entities."""
-
     pool_id: str
     name: str | None = None
     online: bool | None = None
@@ -136,6 +132,7 @@ class PoolLightingSettings:
     schedule_stop_time: str | None = None
     schedule_days: tuple[str, ...] = ()
 
+
 @dataclass(slots=True)
 class PoolBackwashSettings:
     interval: float | None = None
@@ -144,6 +141,7 @@ class PoolBackwashSettings:
     pump_speed: str | None = None
     start_date: str | None = None
     start_time: str | None = None
+
 
 @dataclass(slots=True)
 class PoolEcoValveSettings:
@@ -189,26 +187,15 @@ def _pump_speed(value: Any) -> str | None:
 
 
 def _cover_state(value: Any) -> str | None:
-    return {
-        1: "open",
-        2: "closed",
-        3: "opening",
-        4: "closing",
-        "open": "open",
-        "closed": "closed",
-        "opening": "opening",
-        "closing": "closing",
-    }.get(value)
+    return {1: "open", 2: "closed", 3: "opening", 4: "closing", "open": "open", "closed": "closed", "opening": "opening", "closing": "closing"}.get(value)
 
 
 def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None, float | None, float | None]:
-    """Extract pool name, current pH and current Rx from /pool.data Remix stream."""
     idx = text.find(pool_id)
     if idx == -1:
         _LOGGER.warning("POOL DATA: pool_id not found: %s", pool_id)
         return None, None, None
-
-    context = text[max(0, idx - 1000): idx + 5000]
+    context = text[max(0, idx - 1000):idx + 5000]
     try:
         name_match = re.search(rf'"{re.escape(pool_id)}","([^"]+)"', context)
         ph_match = re.search(r'"metrics".*?"actual",([0-9]+(?:\.[0-9]+)?)', context, re.DOTALL)
@@ -223,8 +210,7 @@ def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None
 
 
 def _extract_input_tag(text: str, name: str) -> str | None:
-    pattern = rf'<input\b[^>]*\bname="{re.escape(name)}"[^>]*>'
-    match = re.search(pattern, text)
+    match = re.search(rf'<input\b[^>]*\bname="{re.escape(name)}"[^>]*>', text)
     return match.group(0) if match else None
 
 
@@ -232,8 +218,8 @@ def _extract_input_value(text: str, name: str) -> str | None:
     tag = _extract_input_tag(text, name)
     if not tag:
         return None
-    value_match = re.search(r'\bvalue="([^"]*)"', tag)
-    return value_match.group(1) if value_match else None
+    match = re.search(r'\bvalue="([^"]*)"', tag)
+    return match.group(1) if match else None
 
 
 def _extract_bool_input(text: str, name: str) -> bool | None:
@@ -253,17 +239,8 @@ def _extract_toggle_days(text: str, name: str) -> tuple[str, ...]:
     idx = text.find(f'name="{name}"')
     if idx == -1:
         return _parse_days(_extract_input_value(text, name))
-
-    segment = text[idx: idx + 12000]
-    day_map = {
-        "Mon": "monday",
-        "Tue": "tuesday",
-        "Wed": "wednesday",
-        "Thu": "thursday",
-        "Fri": "friday",
-        "Sat": "saturday",
-        "Sun": "sunday",
-    }
+    segment = text[idx:idx + 12000]
+    day_map = {"Mon": "monday", "Tue": "tuesday", "Wed": "wednesday", "Thu": "thursday", "Fri": "friday", "Sat": "saturday", "Sun": "sunday"}
     selected: list[str] = []
     for match in re.finditer(r"<button\b([^>]*)>(.*?)</button>", segment, re.DOTALL):
         attrs = match.group(1)
@@ -281,16 +258,14 @@ def _extract_select_value(text: str, name: str) -> str | None:
     idx = text.find(f'name="{name}"')
     if idx == -1:
         return None
-    segment = text[idx: idx + 5000]
+    segment = text[idx:idx + 5000]
     selected = re.search(r'<option\b[^>]*\bselected(?:="[^"]*")?[^>]*\bvalue="([^"]+)"', segment)
     if selected:
         return selected.group(1)
     selected = re.search(r'<option\b[^>]*\bvalue="([^"]+)"[^>]*\bselected', segment)
     if selected:
         return selected.group(1)
-    value = _extract_input_value(text, name)
-    return value if value in PUMP_SPEED_OPTIONS else None
-
+    return _extract_input_value(text, name)
 
 
 def _extract_remix_scalar(text: str, key: str) -> str | None:
@@ -302,6 +277,7 @@ def _extract_remix_scalar(text: str, key: str) -> str | None:
         return value[1:-1]
     return value
 
+
 def _format_smartpool_date(value: str | None) -> str:
     if not value:
         return ""
@@ -309,6 +285,7 @@ def _format_smartpool_date(value: str | None) -> str:
         y, m, d = value.split("-")
         return f"{d}-{m}-{y}"
     return value
+
 
 def _normalize_smartpool_date(value: str | None) -> str | None:
     if not value:
@@ -318,28 +295,24 @@ def _normalize_smartpool_date(value: str | None) -> str | None:
         return f"{y}-{m}-{d}"
     return value
 
+
 class SmartPoolConnectClient:
     """Client for SmartPoolConnect owner portal."""
 
-    def __init__(self, username: str | None = None, password: str | None = None, *, pool_id: str, base_url: str = DEFAULT_BASE_URL, oauth_base_url: str = DEFAULT_OAUTH_BASE_URL, session_cookie: str | None = None) -> None:
+    def __init__(self, username: str | None = None, password: str | None = None, *, pool_id: str, base_url: str = DEFAULT_BASE_URL, oauth_base_url: str = DEFAULT_OAUTH_BASE_URL) -> None:
         self.username = username
         self.password = password
         self.pool_id = pool_id
         self.base_url = base_url.rstrip("/")
         self.oauth_base_url = oauth_base_url.rstrip("/")
-        self.session_cookie = session_cookie
         self._session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
 
     async def close(self) -> None:
         await self._session.close()
 
     async def async_login(self) -> None:
-        if self.session_cookie:
-            self._session.cookie_jar.update_cookies({"connect_session": self.session_cookie})
-            await self._validate_session()
-            return
         if not self.username or not self.password:
-            raise AuthenticationError("Username/password or connect_session is required")
+            raise AuthenticationError("Username and password are required")
         await self._oauth_owner_login()
         await self._dump_cookies("after oauth owner login")
         await self._validate_session()
@@ -519,30 +492,25 @@ class SmartPoolConnectClient:
         s1 = settings.schedule_1 or PoolFilterSchedule()
         s2 = settings.schedule_2 or PoolFilterSchedule()
         s3 = settings.schedule_3 or PoolFilterSchedule()
-        await self._request_json(
-            "PUT",
-            f"/pool/{self.pool_id}/filter.data",
-            data={
-                "always_active": "true" if settings.always_active else "false",
-                "pump_speed": settings.pump_speed or "medium",
-                "schedule_1.pump_speed": s1.pump_speed or "low",
-                "schedule_1.start_time": s1.start_time or "00:00",
-                "schedule_1.stop_time": s1.stop_time or "08:00",
-                "schedule_1.enabled": "true" if s1.enabled else "false",
-                "schedule_1.days": ",".join(s1.days),
-                "schedule_2.pump_speed": s2.pump_speed or "high",
-                "schedule_2.start_time": s2.start_time or "12:00",
-                "schedule_2.stop_time": s2.stop_time or "14:00",
-                "schedule_2.enabled": "true" if s2.enabled else "false",
-                "schedule_2.days": ",".join(s2.days),
-                "schedule_3.pump_speed": s3.pump_speed or "low",
-                "schedule_3.start_time": s3.start_time or "18:00",
-                "schedule_3.stop_time": s3.stop_time or "22:00",
-                "schedule_3.enabled": "true" if s3.enabled else "false",
-                "schedule_3.days": ",".join(s3.days),
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-        )
+        await self._request_json("PUT", f"/pool/{self.pool_id}/filter.data", data={
+            "always_active": "true" if settings.always_active else "false",
+            "pump_speed": settings.pump_speed or "medium",
+            "schedule_1.pump_speed": s1.pump_speed or "low",
+            "schedule_1.start_time": s1.start_time or "00:00",
+            "schedule_1.stop_time": s1.stop_time or "08:00",
+            "schedule_1.enabled": "true" if s1.enabled else "false",
+            "schedule_1.days": ",".join(s1.days),
+            "schedule_2.pump_speed": s2.pump_speed or "high",
+            "schedule_2.start_time": s2.start_time or "12:00",
+            "schedule_2.stop_time": s2.stop_time or "14:00",
+            "schedule_2.enabled": "true" if s2.enabled else "false",
+            "schedule_2.days": ",".join(s2.days),
+            "schedule_3.pump_speed": s3.pump_speed or "low",
+            "schedule_3.start_time": s3.start_time or "18:00",
+            "schedule_3.stop_time": s3.stop_time or "22:00",
+            "schedule_3.enabled": "true" if s3.enabled else "false",
+            "schedule_3.days": ",".join(s3.days),
+        }, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
 
     async def async_get_backwash_settings(self) -> PoolBackwashSettings:
         text = ""
@@ -554,50 +522,19 @@ class SmartPoolConnectClient:
             except SmartPoolConnectError:
                 _LOGGER.debug("Could not read backwash settings page", exc_info=True)
                 return PoolBackwashSettings()
-
         interval = _extract_input_value(text, "interval") or _extract_remix_scalar(text, "interval")
         rinse_duration = _extract_input_value(text, "rinse_duration") or _extract_remix_scalar(text, "rinse_duration")
         backwash_duration = _extract_input_value(text, "backwash_duration") or _extract_remix_scalar(text, "backwash_duration")
-        pump_speed = (
-            _extract_select_value(text, "pump_speed")
-            or _extract_input_value(text, "pump_speed")
-            or _extract_remix_scalar(text, "pump_speed")
-            or "high"
-        )
+        pump_speed = _extract_select_value(text, "pump_speed") or _extract_input_value(text, "pump_speed") or _extract_remix_scalar(text, "pump_speed") or "high"
         start_date = _extract_input_value(text, "start_date") or _extract_remix_scalar(text, "start_date")
         start_time = _extract_input_value(text, "start_time") or _extract_remix_scalar(text, "start_time")
-
-        return PoolBackwashSettings(
-            interval=_as_float(interval),
-            rinse_duration=_as_float(rinse_duration),
-            backwash_duration=_as_float(backwash_duration),
-            pump_speed=pump_speed if pump_speed in BACKWASH_PUMP_SPEED_OPTIONS else "high",
-            start_date=_normalize_smartpool_date(start_date),
-            start_time=start_time,
-        )
+        return PoolBackwashSettings(interval=_as_float(interval), rinse_duration=_as_float(rinse_duration), backwash_duration=_as_float(backwash_duration), pump_speed=pump_speed if pump_speed in BACKWASH_PUMP_SPEED_OPTIONS else "high", start_date=_normalize_smartpool_date(start_date), start_time=start_time)
 
     async def async_set_backwash_settings(self, settings: PoolBackwashSettings) -> None:
-        await self._request_json(
-            "PUT",
-            f"/pool/{self.pool_id}/filter/backwash.data",
-            data={
-                "interval": str(int(settings.interval if settings.interval is not None else 30)),
-                "rinse_duration": str(int(settings.rinse_duration if settings.rinse_duration is not None else 30)),
-                "backwash_duration": str(int(settings.backwash_duration if settings.backwash_duration is not None else 90)),
-                "pump_speed": settings.pump_speed or "high",
-                "start_date": _format_smartpool_date(settings.start_date),
-                "start_time": settings.start_time or "00:00",
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-        )
+        await self._request_json("PUT", f"/pool/{self.pool_id}/filter/backwash.data", data={"interval": str(int(settings.interval if settings.interval is not None else 30)), "rinse_duration": str(int(settings.rinse_duration if settings.rinse_duration is not None else 30)), "backwash_duration": str(int(settings.backwash_duration if settings.backwash_duration is not None else 90)), "pump_speed": settings.pump_speed or "high", "start_date": _format_smartpool_date(settings.start_date), "start_time": settings.start_time or "00:00"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
 
     async def async_start_backwash(self) -> None:
-        await self._request_json(
-            "POST",
-            f"/pool/{self.pool_id}/cmd.data",
-            data={"exec": "backwash"},
-            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-        )
+        await self._request_json("POST", f"/pool/{self.pool_id}/cmd.data", data={"exec": "backwash"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
 
     async def async_get_eco_valve_settings(self) -> PoolEcoValveSettings:
         text = ""
@@ -609,33 +546,13 @@ class SmartPoolConnectClient:
             except SmartPoolConnectError:
                 _LOGGER.debug("Could not read eco valve settings page", exc_info=True)
                 return PoolEcoValveSettings(regulation="off")
-
-        regulation = (
-            _extract_select_value(text, "regulation")
-            or _extract_input_value(text, "regulation")
-            or _extract_remix_scalar(text, "regulation")
-            or "off"
-        )
+        regulation = _extract_select_value(text, "regulation") or _extract_input_value(text, "regulation") or _extract_remix_scalar(text, "regulation") or "off"
         start_time = _extract_input_value(text, "start_time") or _extract_remix_scalar(text, "start_time") or "00:01"
         stop_time = _extract_input_value(text, "stop_time") or _extract_remix_scalar(text, "stop_time") or "00:00"
-
-        return PoolEcoValveSettings(
-            regulation=regulation if regulation in ECO_VALVE_REGULATION_OPTIONS else "off",
-            start_time=start_time,
-            stop_time=stop_time,
-        )
+        return PoolEcoValveSettings(regulation=regulation if regulation in ECO_VALVE_REGULATION_OPTIONS else "off", start_time=start_time, stop_time=stop_time)
 
     async def async_set_eco_valve_settings(self, settings: PoolEcoValveSettings) -> None:
-        await self._request_json(
-            "PUT",
-            f"/pool/{self.pool_id}/filter/eco-valve.data",
-            data={
-                "regulation": settings.regulation if settings.regulation in ECO_VALVE_REGULATION_OPTIONS else "off",
-                "start_time": settings.start_time or "00:01",
-                "stop_time": settings.stop_time or "00:00",
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-        )
+        await self._request_json("PUT", f"/pool/{self.pool_id}/filter/eco-valve.data", data={"regulation": settings.regulation if settings.regulation in ECO_VALVE_REGULATION_OPTIONS else "off", "start_time": settings.start_time or "00:01", "stop_time": settings.stop_time or "00:00"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
 
     async def async_get_status(self) -> PoolStatus:
         live = await self._request_json("GET", f"/api/live-status/{self.pool_id}")
@@ -664,61 +581,17 @@ class SmartPoolConnectClient:
             water_temperature = _as_float(_find_key(pool, {"water_temp", "water_temperature", "temperature"}))
         live_pump_speed = _pump_speed(pump_speed)
         return PoolStatus(
-            pool_id=self.pool_id,
-            name=pool_name or _find_key(pool, {"name", "pool_name"}),
-            online=True,
-            ph=ph,
-            ph_target=ph_settings.target if ph_settings.target is not None else _as_float(_find_key(pool, {"ph_target", "target_ph"})),
-            ph_dosing_time=ph_settings.dosing_time,
-            ph_pausing_time=ph_settings.pausing_time,
-            rx=rx,
-            rx_target=rx_settings.target if rx_settings.target is not None else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"})),
-            rx_dosing_time=rx_settings.dosing_time,
-            rx_pausing_time=rx_settings.pausing_time,
-            lighting_on=lighting_settings.always_active if lighting_settings.always_active is not None else (lighting not in (None, -1, 0)),
-            lighting_always_active=lighting_settings.always_active,
-            lighting_cover_disabled=lighting_settings.cover_disabled,
-            lighting_schedule_enabled=lighting_settings.schedule_enabled,
-            lighting_schedule_start_time=lighting_settings.schedule_start_time,
-            lighting_schedule_stop_time=lighting_settings.schedule_stop_time,
-            lighting_schedule_days=lighting_settings.schedule_days,
-            filter_always_active=filter_settings.always_active,
-            filter_pump_speed=filter_settings.pump_speed or live_pump_speed,
-            filter_schedule_1_enabled=fs1.enabled,
-            filter_schedule_1_pump_speed=fs1.pump_speed or "low",
-            filter_schedule_1_start_time=fs1.start_time,
-            filter_schedule_1_stop_time=fs1.stop_time,
-            filter_schedule_1_days=fs1.days,
-            filter_schedule_2_enabled=fs2.enabled,
-            filter_schedule_2_pump_speed=fs2.pump_speed or "high",
-            filter_schedule_2_start_time=fs2.start_time,
-            filter_schedule_2_stop_time=fs2.stop_time,
-            filter_schedule_2_days=fs2.days,
-            filter_schedule_3_enabled=fs3.enabled,
-            filter_schedule_3_pump_speed=fs3.pump_speed or "low",
-            filter_schedule_3_start_time=fs3.start_time,
-            filter_schedule_3_stop_time=fs3.stop_time,
-            filter_schedule_3_days=fs3.days,
-            backwash_interval=backwash_settings.interval,
-            backwash_rinse_duration=backwash_settings.rinse_duration,
-            backwash_duration=backwash_settings.backwash_duration,
-            backwash_pump_speed=backwash_settings.pump_speed,
-            backwash_start_date=backwash_settings.start_date,
-            backwash_start_time=backwash_settings.start_time,
-            eco_valve_regulation=eco_valve_settings.regulation,
-            eco_valve_start_time=eco_valve_settings.start_time,
-            eco_valve_stop_time=eco_valve_settings.stop_time,
-            water_temperature=water_temperature,
-            water_temperature_target=_as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})),
-            outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})),
-            solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})),
-            pump_speed=live_pump_speed,
-            pump_status=bool(pump_status) if pump_status is not None else None,
-            heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)),
-            cover_state=_cover_state(cover),
-            raw_live_status=live if isinstance(live, dict) else None,
-            raw_pool_status=pool if isinstance(pool, dict) else None,
-        )
+            pool_id=self.pool_id, name=pool_name or _find_key(pool, {"name", "pool_name"}), online=True, ph=ph,
+            ph_target=ph_settings.target if ph_settings.target is not None else _as_float(_find_key(pool, {"ph_target", "target_ph"})), ph_dosing_time=ph_settings.dosing_time, ph_pausing_time=ph_settings.pausing_time,
+            rx=rx, rx_target=rx_settings.target if rx_settings.target is not None else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"})), rx_dosing_time=rx_settings.dosing_time, rx_pausing_time=rx_settings.pausing_time,
+            lighting_on=lighting_settings.always_active if lighting_settings.always_active is not None else (lighting not in (None, -1, 0)), lighting_always_active=lighting_settings.always_active, lighting_cover_disabled=lighting_settings.cover_disabled, lighting_schedule_enabled=lighting_settings.schedule_enabled, lighting_schedule_start_time=lighting_settings.schedule_start_time, lighting_schedule_stop_time=lighting_settings.schedule_stop_time, lighting_schedule_days=lighting_settings.schedule_days,
+            filter_always_active=filter_settings.always_active, filter_pump_speed=filter_settings.pump_speed or live_pump_speed,
+            filter_schedule_1_enabled=fs1.enabled, filter_schedule_1_pump_speed=fs1.pump_speed or "low", filter_schedule_1_start_time=fs1.start_time, filter_schedule_1_stop_time=fs1.stop_time, filter_schedule_1_days=fs1.days,
+            filter_schedule_2_enabled=fs2.enabled, filter_schedule_2_pump_speed=fs2.pump_speed or "high", filter_schedule_2_start_time=fs2.start_time, filter_schedule_2_stop_time=fs2.stop_time, filter_schedule_2_days=fs2.days,
+            filter_schedule_3_enabled=fs3.enabled, filter_schedule_3_pump_speed=fs3.pump_speed or "low", filter_schedule_3_start_time=fs3.start_time, filter_schedule_3_stop_time=fs3.stop_time, filter_schedule_3_days=fs3.days,
+            backwash_interval=backwash_settings.interval, backwash_rinse_duration=backwash_settings.rinse_duration, backwash_duration=backwash_settings.backwash_duration, backwash_pump_speed=backwash_settings.pump_speed, backwash_start_date=backwash_settings.start_date, backwash_start_time=backwash_settings.start_time,
+            eco_valve_regulation=eco_valve_settings.regulation, eco_valve_start_time=eco_valve_settings.start_time, eco_valve_stop_time=eco_valve_settings.stop_time,
+            water_temperature=water_temperature, water_temperature_target=_as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=_cover_state(cover), raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
 
     async def async_set_lighting(self, on: bool) -> None:
         settings = await self.async_get_lighting_settings()
@@ -726,15 +599,7 @@ class SmartPoolConnectClient:
 
     async def async_set_pump_speed(self, speed: str) -> None:
         filter_settings = await self.async_get_filter_settings()
-        await self.async_set_filter_settings(
-            PoolFilterSettings(
-                always_active=filter_settings.always_active if filter_settings.always_active is not None else True,
-                pump_speed=speed,
-                schedule_1=filter_settings.schedule_1,
-                schedule_2=filter_settings.schedule_2,
-                schedule_3=filter_settings.schedule_3,
-            )
-        )
+        await self.async_set_filter_settings(PoolFilterSettings(always_active=filter_settings.always_active if filter_settings.always_active is not None else True, pump_speed=speed, schedule_1=filter_settings.schedule_1, schedule_2=filter_settings.schedule_2, schedule_3=filter_settings.schedule_3))
 
     async def async_cover_open(self) -> None:
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_open", headers={"Content-Type": "application/json"})

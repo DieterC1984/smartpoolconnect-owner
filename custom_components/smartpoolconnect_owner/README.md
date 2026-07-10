@@ -1,28 +1,41 @@
-# SmartPoolConnect Owner Portal - Home Assistant custom integration
+# SmartPoolConnect Owner
 
-Experimental owner-login based integration for the new SmartPoolConnect portal.
+Unofficial Home Assistant integration for SmartPoolConnect owner portals.
 
-## New portal endpoints mapped
+This integration uses the SmartPoolConnect owner portal login and a pool UUID. It does not use or expose session cookies in the configuration flow.
 
-Read:
+## Configuration
 
-```text
-GET /api/live-status/<pool_uuid>
-GET /api/pool-status/<pool_uuid>
-```
+You need:
 
-Write:
+- SmartPoolConnect owner e-mail address
+- SmartPoolConnect owner password
+- Pool UUID
 
-```text
-PATCH /pool/<pool_uuid>/lighting.data
-POST /api/cmd/<pool_uuid>/cover_open
-POST /api/cmd/<pool_uuid>/cover_close
-POST /api/cmd/<pool_uuid>/cover_stop
-```
+## Installation via HACS
 
-## Authentication
-Uses SmartPoolConnect web-portal session/OAuth flow, not a shared `spc_` API key.
-Each user must use their own owner credentials.
+1. Open HACS.
+2. Go to Integrations.
+3. Add this repository as a custom repository.
+4. Category: Integration.
+5. Install SmartPoolConnect Owner.
+6. Restart Home Assistant.
+7. Add the integration from Settings → Devices & services.
 
-## Safety
-The cover entity is included but disabled by default. Enable only if you can independently verify the pool area is clear before every command.
+## Features
+
+- pH monitoring and configuration
+- Rx / ORP monitoring and configuration
+- Filter schedules
+- Lighting configuration
+- Cover / deck control
+- Backwash configuration and start button
+- Eco Valve configuration
+
+## Privacy
+
+Do not publish usernames, passwords, pool UUIDs, session cookies, raw SmartPoolConnect responses or Home Assistant logs containing personal data.
+
+## Disclaimer
+
+This project is not affiliated with SmartPoolConnect. Use at your own risk.

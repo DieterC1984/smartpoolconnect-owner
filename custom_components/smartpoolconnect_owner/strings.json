@@ -2,38 +2,22 @@
   "config": {
     "step": {
       "user": {
-        "title": "SmartPoolConnect Owner Portal",
-        "description": "Log in with SmartPoolConnect owner credentials.",
+        "title": "SmartPoolConnect Owner",
+        "description": "Log in with your SmartPoolConnect owner credentials and pool UUID.",
         "data": {
           "pool_id": "Pool UUID",
           "username": "E-mail",
-          "password": "Password",
-          "session_cookie": "connect_session cookie (debug only)"
+          "password": "Password"
         }
       }
     },
     "error": {
-      "invalid_auth": "Invalid login or expired session.",
+      "invalid_auth": "Invalid login credentials.",
       "cannot_connect": "Could not connect to SmartPoolConnect.",
       "unknown": "Unexpected error."
     },
     "abort": {
       "already_configured": "This pool is already configured."
-    }
-  },
-  "entity": {
-    "select": {
-      "eco_valve_regulation": {
-        "name": "Eco Valve 01 Regulation"
-      }
-    },
-    "time": {
-      "eco_valve_start_time": {
-        "name": "Eco Valve 02 Start Time"
-      },
-      "eco_valve_stop_time": {
-        "name": "Eco Valve 03 Stop Time"
-      }
     }
   }
 }
