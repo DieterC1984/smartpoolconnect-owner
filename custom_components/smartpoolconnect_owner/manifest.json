@@ -1,0 +1,13 @@
+{
+  "domain": "smartpoolconnect_owner",
+  "name": "SmartPoolConnect Owner Portal",
+  "codeowners": [
+    "@DieterC1984"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/timsevenants/ha-smartpoolcontrol",
+  "integration_type": "device",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.0-alpha.2"
+}
