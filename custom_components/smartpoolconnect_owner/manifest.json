@@ -5,7 +5,7 @@
     "@DieterC1984"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/timsevenants/ha-smartpoolcontrol",
+  "documentation": "https://github.com/DieterC1984/smartpoolconnect-owner",
   "integration_type": "device",
   "iot_class": "cloud_polling",
   "requirements": [],
