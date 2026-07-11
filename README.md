@@ -56,8 +56,7 @@ The integration can be configured from the Home Assistant UI.
 
 You need:
 
-- SmartPoolConnect owner portal credentials, or
-- a valid SmartPoolConnect session cookie for debugging/testing purposes, and
+- SmartPoolConnect owner portal credentials, and
 - the pool UUID used by the SmartPoolConnect owner portal.
 
 Do not publish credentials, session cookies, pool UUIDs, or raw portal responses in GitHub issues.
