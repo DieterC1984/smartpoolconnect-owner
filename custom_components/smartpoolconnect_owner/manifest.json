@@ -1,3 +1,4 @@
+
 {
   "domain": "smartpoolconnect_owner",
   "name": "SmartPoolConnect Owner",
@@ -6,5 +7,8 @@
   "integration_type": "device",
   "iot_class": "cloud_polling",
   "requirements": [],
-  "version": "1.0.3"
+  "version": "1.0.3",
+  "codeowners": [
+    "@DieterC1984"
+  ]
 }
