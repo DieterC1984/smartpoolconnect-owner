@@ -16,6 +16,11 @@ from .const import DEFAULT_BASE_URL, DEFAULT_OAUTH_BASE_URL, PUMP_SPEEDS
 
 _LOGGER = logging.getLogger(__name__)
 
+RX_MIN_VALID: float = 100.0
+RX_MAX_VALID: float = 1500.0
+RX_MAX_DELTA: float = 300.0
+_LAST_VALID_RX: float | None = None
+
 DAYS: tuple[str, ...] = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "maximum")
 BACKWASH_PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "max")
@@ -202,7 +207,28 @@ def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None
         rx_match = re.search(r'"cl".*?},([0-9]+(?:\.[0-9]+)?),', context, re.DOTALL)
         name = name_match.group(1) if name_match else None
         ph = _as_float(ph_match.group(1)) if ph_match else None
+        global _LAST_VALID_RX
+
         rx = _as_float(rx_match.group(1)) if rx_match else None
+
+        if rx is not None:
+            if rx < RX_MIN_VALID or rx > RX_MAX_VALID:
+                _LOGGER.debug(
+                    "Ignoring invalid Rx value %s, using previous valid value %s",
+                    rx,
+                    _LAST_VALID_RX,
+                )
+                rx = _LAST_VALID_RX
+            elif _LAST_VALID_RX is not None and abs(rx - _LAST_VALID_RX) > RX_MAX_DELTA:
+                _LOGGER.debug(
+                    "Ignoring Rx spike %s -> %s, using previous valid value",
+                    _LAST_VALID_RX,
+                    rx,
+                )
+                rx = _LAST_VALID_RX
+            else:
+                _LAST_VALID_RX = rx
+
         return name, round(ph, 2) if ph is not None else None, round(rx, 0) if rx is not None else None
     except Exception:
         _LOGGER.exception("Failed to extract pH/Rx from /pool.data")
