@@ -1,14 +1,14 @@
 {
   "domain": "smartpoolconnect_owner",
   "name": "SmartPoolConnect Owner",
-  "config_flow": true,
-  "documentation": "https://github.com/DieterC1984/smartpoolconnect-owner",
-  "issue_tracker": "https://github.com/DieterC1984/smartpoolconnect-owner/issues",
-  "integration_type": "device",
-  "iot_class": "cloud_polling",
-  "requirements": [],
-  "version": "1.0.4",
   "codeowners": [
     "@DieterC1984"
-  ]
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/DieterC1984/smartpoolconnect-owner",
+  "integration_type": "device",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/DieterC1984/smartpoolconnect-owner/issues",
+  "requirements": [],
+  "version": "1.0.4"
 }
