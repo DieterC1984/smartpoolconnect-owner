@@ -81,6 +81,8 @@ Typical entities include:
 - Start Backwash button
 - Eco Valve regulation
 
+<img width="447" height="1251" alt="image" src="https://github.com/user-attachments/assets/b0778da4-7e39-4074-80ab-c0673aaeacbe" />
+
 ## Notes and limitations
 
 SmartPoolConnect uses a cloud portal. This integration depends on the availability and behavior of that portal.
