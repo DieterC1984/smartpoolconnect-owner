@@ -8,7 +8,7 @@ from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity, Swi
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import SmartPoolConnectConfigEntry
-from .api import DAYS, PoolFilterSchedule, PoolFilterSettings, PoolLightingSettings, PoolStatus
+from .api import DAYS, PoolCoverSettings, PoolFilterSchedule, PoolFilterSettings, PoolLightingSettings, PoolStatus
 from .entity import SmartPoolConnectEntity
 PENDING_TIMEOUT_SECONDS = 45
 
@@ -120,10 +120,57 @@ def _set_filter_schedule_day(idx: int, day: str):
         await _commit_filter(e, settings)
     return setter
 
+def _cover_from_data(d: PoolStatus) -> PoolCoverSettings:
+    """Build cover settings from coordinator data, preserving observed defaults."""
+    return PoolCoverSettings(
+        protection=True if d.cover_protection is None else d.cover_protection,
+        pump_open=False if d.cover_pump_open is None else d.cover_pump_open,
+        pump_close=True if d.cover_pump_close is None else d.cover_pump_close,
+        pump_low_speed=False if d.cover_pump_low_speed is None else d.cover_pump_low_speed,
+    )
+
+def _cover(coordinator) -> PoolCoverSettings:
+    pending = _store(coordinator).get("cover")
+    if pending:
+        return pending["value"]
+    return _cover_from_data(coordinator.data)
+
+async def _commit_cover(e, settings: PoolCoverSettings) -> None:
+    # Refresh optional location fields from the cover page if available.
+    current = await e.coordinator.client.async_get_cover_settings()
+    settings.longitude = current.longitude
+    settings.latitude = current.latitude
+    _save_pending(e.coordinator, "cover", settings)
+    await e.coordinator.client.async_set_cover_settings(settings)
+
+async def _set_cover_protection(e, v):
+    settings = _cover(e.coordinator)
+    settings.protection = v
+    await _commit_cover(e, settings)
+
+async def _set_cover_pump_open(e, v):
+    settings = _cover(e.coordinator)
+    settings.pump_open = v
+    await _commit_cover(e, settings)
+
+async def _set_cover_pump_close(e, v):
+    settings = _cover(e.coordinator)
+    settings.pump_close = v
+    await _commit_cover(e, settings)
+
+async def _set_cover_pump_low_speed(e, v):
+    settings = _cover(e.coordinator)
+    settings.pump_low_speed = v
+    await _commit_cover(e, settings)
+
 SWITCHES: list[SmartPoolSwitchDescription] = [
     SmartPoolSwitchDescription(key="lighting", translation_key="lighting", icon="mdi:lightbulb", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.lighting_always_active if s.lighting_always_active is not None else s.lighting_on, set_fn=_set_lighting_always),
     SmartPoolSwitchDescription(key="lighting_cover_disabled", translation_key="lighting_cover_disabled", icon="mdi:window-shutter-alert", value_fn=lambda s: s.lighting_cover_disabled, set_fn=_set_lighting_cover_disabled),
     SmartPoolSwitchDescription(key="lighting_schedule_enabled", translation_key="lighting_schedule_enabled", icon="mdi:calendar-clock", value_fn=lambda s: s.lighting_schedule_enabled, set_fn=_set_lighting_schedule_enabled),
+    SmartPoolSwitchDescription(key="cover_protection", translation_key="cover_protection", icon="mdi:shield-check", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.cover_protection if s.cover_protection is not None else True, set_fn=_set_cover_protection),
+    SmartPoolSwitchDescription(key="opening_pump", translation_key="opening_pump", icon="mdi:pump", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.cover_pump_open if s.cover_pump_open is not None else False, set_fn=_set_cover_pump_open),
+    SmartPoolSwitchDescription(key="closing_pump", translation_key="closing_pump", icon="mdi:pump", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.cover_pump_close if s.cover_pump_close is not None else True, set_fn=_set_cover_pump_close),
+    SmartPoolSwitchDescription(key="opening_pump_slow", translation_key="opening_pump_slow", icon="mdi:speedometer-slow", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.cover_pump_low_speed if s.cover_pump_low_speed is not None else False, set_fn=_set_cover_pump_low_speed),
 ]
 for day in DAYS:
     SWITCHES.append(SmartPoolSwitchDescription(key=f"lighting_schedule_{day}", translation_key=f"lighting_schedule_{day}", icon="mdi:calendar", value_fn=lambda s, d=day: d in s.lighting_schedule_days, set_fn=_set_lighting_day(day)))
@@ -138,6 +185,10 @@ NAMES = {
     "lighting_cover_disabled": "Lighting 02 Disabled When Cover Closed",
     "lighting_schedule_enabled": "Lighting 03 Schedule Enabled",
     "filter_always_active": "Filter 01 Always Active",
+    "cover_protection": "Cover 01 Protection",
+    "opening_pump": "Cover 02 Opening Pump",
+    "closing_pump": "Cover 03 Closing Pump",
+    "opening_pump_slow": "Cover 04 Opening Pump Slow Mode",
 }
 NAMES.update({f"lighting_schedule_{d}": f"Lighting Schedule {i + 1:02d} {d.title()}" for i, d in enumerate(DAYS)})
 for i in (1, 2, 3):
