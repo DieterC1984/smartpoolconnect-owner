@@ -62,7 +62,19 @@ SmartPoolNumberDescription(key="backwash_interval",translation_key="backwash_int
 SmartPoolNumberDescription(key="backwash_rinse_duration",translation_key="backwash_rinse_duration",native_min_value=1,native_max_value=999,native_step=1,mode=NumberMode.BOX,native_unit_of_measurement="s",value_fn=lambda s:s.backwash_rinse_duration,set_fn=_set_bw_rinse),
 SmartPoolNumberDescription(key="backwash_duration",translation_key="backwash_duration",native_min_value=1,native_max_value=999,native_step=1,mode=NumberMode.BOX,native_unit_of_measurement="s",value_fn=lambda s:s.backwash_duration,set_fn=_set_bw_duration),
 )
-NAMES={"ph_target":"pH Target","ph_dosing_time":"pH Dosing Time","ph_pausing_time":"pH Pause Time","rx_target":"Rx Target","rx_dosing_time":"Rx Dosing Time","rx_pausing_time":"Rx Pause Time","backwash_interval":"Backwash 01 Interval","backwash_rinse_duration":"Backwash 02 Rinse Duration","backwash_duration":"Backwash 03 Duration"}
+
+NAMES={
+    "ph_target":"pH Target",
+    "ph_dosing_time":"pH Dosing Time",
+    "ph_pausing_time":"pH Pause Time",
+    "rx_target":"Rx Target",
+    "rx_dosing_time":"Rx Dosing Time",
+    "rx_pausing_time":"Rx Pause Time",
+    "backwash_interval":"Backwash Setting Interval",
+    "backwash_rinse_duration":"Backwash Setting Rinse Duration",
+    "backwash_duration":"Backwash Setting Duration",
+}
+
 async def async_setup_entry(hass:HomeAssistant,entry:SmartPoolConnectConfigEntry,async_add_entities:AddEntitiesCallback)->None:
     async_add_entities(SmartPoolNumber(entry.runtime_data,d) for d in NUMBERS)
 class SmartPoolNumber(SmartPoolConnectEntity,NumberEntity):

@@ -44,7 +44,11 @@ async def _set_backwash_start_date(e, value: str):
     s = _backwash(e.coordinator); s.start_date = value
     await _commit_backwash(e, s)
 DATES = (SmartPoolDateDescription(key="backwash_start_date", translation_key="backwash_start_date", value_fn=lambda s: s.backwash_start_date, set_fn=_set_backwash_start_date),)
-NAMES = {"backwash_start_date": "Backwash 05 Start Date"}
+
+NAMES = {
+    "backwash_start_date": "Backwash Setting Start Date"
+}
+
 async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     async_add_entities(SmartPoolDate(entry.runtime_data, d) for d in DATES)
 class SmartPoolDate(SmartPoolConnectEntity, DateEntity):

@@ -130,10 +130,18 @@ for i in (1, 2, 3):
     TIMES.append(SmartPoolTimeDescription(key=f"filter_schedule_{i}_start_time", translation_key=f"filter_schedule_{i}_start_time", value_fn=lambda s, idx=i: getattr(s, f"filter_schedule_{idx}_start_time"), set_fn=_set_filter_time(i, "start_time")))
     TIMES.append(SmartPoolTimeDescription(key=f"filter_schedule_{i}_stop_time", translation_key=f"filter_schedule_{i}_stop_time", value_fn=lambda s, idx=i: getattr(s, f"filter_schedule_{idx}_stop_time"), set_fn=_set_filter_time(i, "stop_time")))
 
-NAMES = {"lighting_start_time": "Lighting 04 Start Time", "lighting_stop_time": "Lighting 05 Stop Time", "backwash_start_time": "Backwash 06 Start Time", "eco_valve_start_time": "Eco Valve 02 Start Time", "eco_valve_stop_time": "Eco Valve 03 Stop Time"}
+NAMES = {
+    "lighting_start_time": "Lighting Schedule Start Time",
+    "lighting_stop_time": "Lighting Schedule Stop Time",
+    "backwash_start_time": "Backwash Setting Start Time",
+    "eco_valve_start_time": "Eco Valve Start Time",
+    "eco_valve_stop_time": "Eco Valve Stop Time",
+}
+
 for i in (1, 2, 3):
-    NAMES[f"filter_schedule_{i}_start_time"] = f"Filter Schedule {i} 03 Start Time"
-    NAMES[f"filter_schedule_{i}_stop_time"] = f"Filter Schedule {i} 04 Stop Time"
+    NAMES[f"filter_schedule_{i}_start_time"] = f"Filter Schedule {i} Start Time"
+    NAMES[f"filter_schedule_{i}_stop_time"] = f"Filter Schedule {i} Stop Time"
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     async_add_entities(SmartPoolTime(entry.runtime_data, description) for description in TIMES)

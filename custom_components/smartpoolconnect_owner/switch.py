@@ -181,20 +181,27 @@ for idx in (1, 2, 3):
         SWITCHES.append(SmartPoolSwitchDescription(key=f"filter_schedule_{idx}_{day}", translation_key=f"filter_schedule_{idx}_{day}", icon="mdi:calendar", value_fn=lambda s, i=idx, d=day: d in getattr(s, f"filter_schedule_{i}_days"), set_fn=_set_filter_schedule_day(idx, day)))
 
 NAMES = {
-    "lighting": "Lighting 01 Always Active",
-    "lighting_cover_disabled": "Lighting 02 Disabled When Cover Closed",
-    "lighting_schedule_enabled": "Lighting 03 Schedule Enabled",
-    "filter_always_active": "Filter 01 Always Active",
-    "cover_protection": "Cover 01 Protection",
-    "opening_pump": "Cover 02 Opening Pump",
-    "closing_pump": "Cover 03 Closing Pump",
-    "opening_pump_slow": "Cover 04 Opening Pump Slow Mode",
+    "lighting": "Lighting Always Active",
+    "lighting_cover_disabled": "Lighting Disabled When Cover Closed",
+    "lighting_schedule_enabled": "Lighting Schedule",
+    "filter_always_active": "Filter Pump",
+    "cover_protection": "Cover Protection",
+    "opening_pump": "Cover Opening Pump",
+    "closing_pump": "Cover Closing Pump",
+    "opening_pump_slow": "Cover Opening Pump Slow Mode",
 }
-NAMES.update({f"lighting_schedule_{d}": f"Lighting Schedule {i + 1:02d} {d.title()}" for i, d in enumerate(DAYS)})
+
+NAMES.update({
+    f"lighting_schedule_{d}": f"Lighting Schedule Day {i + 1} {d.title()}"
+    for i, d in enumerate(DAYS)
+})
+
 for i in (1, 2, 3):
-    NAMES[f"filter_schedule_{i}_enabled"] = f"Filter Schedule {i} 01 Enabled"
-    for pos, day in enumerate(DAYS, start=5):
-        NAMES[f"filter_schedule_{i}_{day}"] = f"Filter Schedule {i} {pos:02d} {day.title()}"
+    NAMES[f"filter_schedule_{i}_enabled"] = f"Filter Schedule {i}"
+    for day_idx, day in enumerate(DAYS, start=1):
+        NAMES[f"filter_schedule_{i}_{day}"] = (
+            f"Filter Schedule {i} Day {day_idx} {day.title()}"
+        )
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     async_add_entities(SmartPoolSwitch(entry.runtime_data, description) for description in SWITCHES)

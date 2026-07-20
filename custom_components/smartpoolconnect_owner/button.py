@@ -9,7 +9,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
     async_add_entities([StartBackwashButton(entry.runtime_data)])
 class StartBackwashButton(SmartPoolConnectEntity, ButtonEntity):
     _attr_icon = "mdi:waves"
-    _attr_name = "Backwash 07 Start Backwash"
+    _attr_name = "Backwash Trigger"
     _attr_translation_key = "start_backwash"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "start_backwash")

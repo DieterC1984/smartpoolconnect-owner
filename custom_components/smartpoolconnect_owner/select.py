@@ -99,9 +99,15 @@ SELECTS = [
 for i in (1, 2, 3):
     SELECTS.append(SmartPoolSelectDescription(key=f"filter_schedule_{i}_pump_speed", translation_key=f"filter_schedule_{i}_pump_speed", icon="mdi:pump", options=list(PUMP_SPEED_OPTIONS), value_fn=lambda s, idx=i: getattr(s, f"filter_schedule_{idx}_pump_speed"), set_fn=_set_schedule_speed(i)))
 
-NAMES = {"eco_valve_regulation": "Eco Valve 01 Regulation", "backwash_pump_speed": "Backwash 04 Pump Speed", "filter_pump_speed": "Filter 02 Pump Speed"}
+NAMES = {
+    "eco_valve_regulation": "Eco Valve Regulation",
+    "backwash_pump_speed": "Backwash Pump Speed",
+    "filter_pump_speed": "Filter Pump Standard Speed",
+}
+
+
 for i in (1, 2, 3):
-    NAMES[f"filter_schedule_{i}_pump_speed"] = f"Filter Schedule {i} 02 Pump Speed"
+    NAMES[f"filter_schedule_{i}_pump_speed"] = f"Filter Schedule {i} Pump Speed"
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     async_add_entities(SmartPoolSelect(entry.runtime_data, description) for description in SELECTS)
