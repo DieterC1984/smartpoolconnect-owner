@@ -2,25 +2,63 @@
 
 Unofficial Home Assistant integration for SmartPoolConnect owner portals.
 
-This custom integration lets Home Assistant read and control supported SmartPoolConnect owner-portal functions from the cloud portal.
+This custom integration allows Home Assistant users to monitor and control supported SmartPoolConnect swimming pool functions through the SmartPoolConnect cloud portal from EPS (Europe Pool Supplies), and is designed for swimming pools equipped with the EPS Nexus Full Control system.
 
-> This project is not affiliated with, endorsed by, or supported by SmartPoolConnect.
+> This project is not affiliated with, endorsed by, or supported by EPS.
+
 
 ## Features
 
-- Pool online/status information
-- pH current value
-- pH target and dosing configuration
-- Rx / ORP current value
-- Rx / ORP target and dosing configuration
-- Water temperature and other available pool sensors
-- Pool cover / deck control
-- Lighting configuration
-- Filter pump configuration
-- Filter schedules with weekday selection
-- Backwash configuration
-- Start Backwash button
-- Eco Valve configuration
+### Monitoring
+- Pool online status
+- Water temperature
+- pH value
+- Rx value
+- Heating status
+- Pump status and current speed
+- Cover status
+
+### Water Treatment
+- pH dosing target configuration
+- pH dosing time configuration
+- pH dosing pause time configuration
+- Rx dosing target configuration
+- Rx dosing time configuration
+- Rx dosing pause time configuration
+
+### Filtration
+- Filter pump control
+- Filter pump speed configuration
+- Up to 3 configurable filter schedules
+- Weekday selection per schedule
+- Schedule start and stop times
+
+### Backwash
+- Backwash scheduling
+- Backwash start date and time
+- Backwash interval configuration
+- Backwash duration configuration
+- Backwash rinse duration configuration
+- Backwash pump speed configuration
+- One-click Backwash trigger
+
+### Cover Control
+- Open and close pool cover
+- Cover protection settings
+- Automatic pump shutdown during pool cover movement
+- Optional slow-speed mode for cover opening and closing
+
+
+### Eco Valve
+- Eco Valve control
+- Eco Valve scheduling
+- Eco Valve Start and stop time configuration
+
+### Lighting
+- Lighting control
+- Scheduled lighting operation
+- Weekday-based lighting schedules
+- Cover-aware lighting behavior
 
 ## Installation with HACS
 
@@ -65,44 +103,14 @@ Do not publish credentials, session cookies, pool UUIDs, or raw portal responses
 
 The exact available entities depend on the capabilities of your SmartPoolConnect installation.
 
-Typical entities include:
-
-- pH sensor
-- Rx / ORP sensor
-- pH target
-- Rx / ORP target
-- pH dosing time
-- Rx dosing time
-- Filter pump speed
-- Filter schedules
-- Lighting schedule
-- Cover / deck controls
-- Backwash settings
-- Start Backwash button
-- Eco Valve regulation
-
 <img width="447" height="1251" alt="image" src="https://github.com/user-attachments/assets/b0778da4-7e39-4074-80ab-c0673aaeacbe" />
 
 ## Notes and limitations
 
 SmartPoolConnect uses a cloud portal. This integration depends on the availability and behavior of that portal.
 
-Some values may be exposed by the portal only as writeable settings and may not always be returned clearly through the read endpoints. In those cases the integration uses safe defaults to keep entities usable.
-
 ## Privacy and security
-
-This repository should not contain:
-
-- usernames
-- passwords
-- session cookies
-- pool UUIDs
-- pool names
-- raw API responses
-- Home Assistant logs containing personal data
-
 If you open an issue, remove sensitive information first.
 
 ## Disclaimer
-
 Use this integration at your own risk. Pool equipment can be safety-sensitive. Always verify critical changes in the official SmartPoolConnect portal or on the physical installation.
