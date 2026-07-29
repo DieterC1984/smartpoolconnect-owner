@@ -668,7 +668,7 @@ class SmartPoolConnectClient:
             return text
 
     async def _request_json(self, method: str, path: str, **kwargs: Any) -> Any:
-        text = a**it self._request_text_with_reauth**ethod, path, **kwargs)
+        text = await self._request_text_with_reauth(method, path, **kwargs)
         if not text:
             return {}
         try:
