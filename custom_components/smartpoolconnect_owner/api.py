@@ -34,6 +34,8 @@ class SmartPoolConnectError(Exception):
 class AuthenticationError(SmartPoolConnectError):
     """Authentication failed."""
 
+class TransientServerError(SmartPoolConnectError):
+    """Temporary SmartPoolConnect backend error."""
 
 @dataclass(slots=True)
 class PoolFilterSchedule:
@@ -522,6 +524,32 @@ class SmartPoolConnectClient:
         await self._dump_cookies("after oauth owner login")
         await self._validate_session()
 
+    async def _request_text_with_reauth(
+        self,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> str:
+        try:
+            return await self._request_text(
+                method,
+                path,
+                **kwargs,
+            )
+
+        except AuthenticationError:
+            _LOGGER.warning(
+                "SmartPoolConnect session expired, attempting re-login"
+            )
+
+            await self.async_login()
+
+            return await self._request_text(
+                method,
+                path,
+                **kwargs,
+            )
+
     async def _oauth_owner_login(self) -> None:
         login_page_url = await self._get_login_page_url()
         async with self._session.get(login_page_url) as resp:
@@ -623,13 +651,24 @@ class SmartPoolConnectClient:
             text = await resp.text()
             _LOGGER.debug("%s %s -> HTTP %s content-type=%s body_prefix=%s", method, path, resp.status, resp.headers.get("content-type"), text[:120])
             if resp.status in (401, 403):
-                raise AuthenticationError(f"SmartPoolConnect session is not authorized: HTTP {resp.status}")
+                raise AuthenticationError(
+                    f"SmartPoolConnect session is not authorized: HTTP {resp.status}"
+                )
+
+            if resp.status in (502, 503, 504):
+                raise TransientServerError(
+                    f"{method} {path} failed: HTTP {resp.status}"
+                )
+
             if resp.status >= 400:
-                raise SmartPoolConnectError(f"{method} {path} failed: HTTP {resp.status}: {text[:300]}")
+                raise SmartPoolConnectError(
+                    f"{method} {path} failed: HTTP {resp.status}: {text[:300]}"
+                )
+
             return text
 
     async def _request_json(self, method: str, path: str, **kwargs: Any) -> Any:
-        text = await self._request_text(method, path, **kwargs)
+        text = a**it self._request_text_with_reauth**ethod, path, **kwargs)
         if not text:
             return {}
         try:

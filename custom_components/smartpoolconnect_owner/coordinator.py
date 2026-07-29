@@ -12,7 +12,12 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .api import PoolStatus, SmartPoolConnectClient, SmartPoolConnectError
+from .api import (
+    PoolStatus,
+    SmartPoolConnectClient,
+    SmartPoolConnectError,
+    TransientServerError,
+)
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +58,16 @@ class SmartPoolConnectCoordinator(DataUpdateCoordinator[PoolStatus]):
                 self._last_good_data = data
 
             return data
+
+        except TransientServerError as err:
+            if self._last_good_data is not None:
+                _LOGGER.debug(
+                    "Temporary SmartPoolConnect backend error, keeping previous values: %s",
+                    err,
+                )
+                return self._last_good_data
+
+            raise UpdateFailed(str(err)) from err
 
         except SmartPoolConnectError as err:
             if self._last_good_data is not None:
