@@ -47,12 +47,12 @@ async def _commit_filter(e, settings: PoolFilterSettings) -> None:
     await e.coordinator.client.async_set_filter_settings(settings)
 
 async def _set_filter_pump_speed(e, value):
-    settings = _filter(e.coordinator); settings.pump_speed = value
+    settings = await e.coordinator.client.async_get_filter_settings(); settings.pump_speed = value
     await _commit_filter(e, settings)
 
 def _set_schedule_speed(idx: int):
     async def setter(e, value):
-        settings = _filter(e.coordinator)
+        settings = await e.coordinator.client.async_get_filter_settings()
         getattr(settings, f"schedule_{idx}").pump_speed = value
         await _commit_filter(e, settings)
     return setter
@@ -71,7 +71,7 @@ async def _commit_backwash(e, settings: PoolBackwashSettings) -> None:
     await e.coordinator.client.async_set_backwash_settings(settings)
 
 async def _set_backwash_pump_speed(e, value):
-    settings = _backwash(e.coordinator); settings.pump_speed = value
+    settings = await e.coordinator.client.async_get_backwash_settings(); settings.pump_speed = value
     await _commit_backwash(e, settings)
 
 def _eco_valve_from_data(d: PoolStatus) -> PoolEcoValveSettings:
@@ -88,7 +88,7 @@ async def _commit_eco_valve(e, settings: PoolEcoValveSettings) -> None:
     await e.coordinator.client.async_set_eco_valve_settings(settings)
 
 async def _set_eco_valve_regulation(e, value):
-    settings = _eco_valve(e.coordinator); settings.regulation = value
+    settings = await e.coordinator.client.async_get_eco_valve_settings(); settings.regulation = value
     await _commit_eco_valve(e, settings)
 
 SELECTS = [

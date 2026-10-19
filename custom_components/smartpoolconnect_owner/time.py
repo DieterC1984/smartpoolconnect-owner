@@ -98,23 +98,21 @@ async def _commit_eco_valve(e, settings: PoolEcoValveSettings) -> None:
     await e.coordinator.client.async_set_eco_valve_settings(settings)
 
 async def _set_light_start(e, v):
-    settings = _lighting(e.coordinator); settings.schedule_start_time = v
-    await _commit_lighting(e, settings)
+    await e.coordinator.client.async_set_lighting_settings(schedule_start_time=v)
 async def _set_light_stop(e, v):
-    settings = _lighting(e.coordinator); settings.schedule_stop_time = v
-    await _commit_lighting(e, settings)
+    await e.coordinator.client.async_set_lighting_settings(schedule_stop_time=v)
 def _set_filter_time(idx: int, field: str):
     async def setter(e, v):
-        settings = _filter(e.coordinator)
+        settings = await e.coordinator.client.async_get_filter_settings()
         setattr(getattr(settings, f"schedule_{idx}"), field, v)
         await _commit_filter(e, settings)
     return setter
 async def _set_backwash_start_time(e, v):
-    settings = _backwash(e.coordinator); settings.start_time = v
+    settings = await e.coordinator.client.async_get_backwash_settings(); settings.start_time = v
     await _commit_backwash(e, settings)
 def _set_eco_valve_time(field: str):
     async def setter(e, v):
-        settings = _eco_valve(e.coordinator)
+        settings = await e.coordinator.client.async_get_eco_valve_settings()
         setattr(settings, field, v)
         await _commit_eco_valve(e, settings)
     return setter

@@ -58,20 +58,21 @@ async def _commit_lighting(e, settings: PoolLightingSettings) -> None:
     )
 
 async def _set_lighting_always(e, v):
-    settings = _lighting(e.coordinator); settings.always_active = v
-    await _commit_lighting(e, settings)
+    await e.coordinator.client.async_set_lighting_settings(always_active=v)
 async def _set_lighting_cover_disabled(e, v):
-    settings = _lighting(e.coordinator); settings.cover_disabled = v
-    await _commit_lighting(e, settings)
+    await e.coordinator.client.async_set_lighting_settings(cover_disabled=v)
 async def _set_lighting_schedule_enabled(e, v):
-    settings = _lighting(e.coordinator); settings.schedule_enabled = v
-    await _commit_lighting(e, settings)
+    await e.coordinator.client.async_set_lighting_settings(schedule_enabled=v)
 def _set_lighting_day(day):
     async def setter(e, v):
-        settings = _lighting(e.coordinator); days = set(settings.schedule_days)
+        current = await e.coordinator.client.async_get_lighting_settings(force_refresh=True)
+        if not current.valid:
+            raise RuntimeError("Lighting settings could not be read before update")
+        days = set(current.schedule_days)
         days.add(day) if v else days.discard(day)
-        settings.schedule_days = tuple(d for d in DAYS if d in days)
-        await _commit_lighting(e, settings)
+        await e.coordinator.client.async_set_lighting_settings(
+            schedule_days=tuple(d for d in DAYS if d in days)
+        )
     return setter
 
 def _filter_schedule(d: PoolStatus, idx: int) -> PoolFilterSchedule:
@@ -103,17 +104,18 @@ async def _commit_filter(e, settings: PoolFilterSettings) -> None:
     await e.coordinator.client.async_set_filter_settings(settings)
 
 async def _set_filter_always(e, v):
-    settings = _filter(e.coordinator); settings.always_active = v
+    settings = await e.coordinator.client.async_get_filter_settings()
+    settings.always_active = v
     await _commit_filter(e, settings)
 def _set_filter_schedule_enabled(idx: int):
     async def setter(e, v):
-        settings = _filter(e.coordinator)
+        settings = await e.coordinator.client.async_get_filter_settings()
         getattr(settings, f"schedule_{idx}").enabled = v
         await _commit_filter(e, settings)
     return setter
 def _set_filter_schedule_day(idx: int, day: str):
     async def setter(e, v):
-        settings = _filter(e.coordinator); schedule = getattr(settings, f"schedule_{idx}")
+        settings = await e.coordinator.client.async_get_filter_settings(); schedule = getattr(settings, f"schedule_{idx}")
         days = set(schedule.days)
         days.add(day) if v else days.discard(day)
         schedule.days = tuple(d for d in DAYS if d in days)
@@ -136,30 +138,26 @@ def _cover(coordinator) -> PoolCoverSettings:
     return _cover_from_data(coordinator.data)
 
 async def _commit_cover(e, settings: PoolCoverSettings) -> None:
-    # Refresh optional location fields from the cover page if available.
-    current = await e.coordinator.client.async_get_cover_settings()
-    settings.longitude = current.longitude
-    settings.latitude = current.latitude
     _save_pending(e.coordinator, "cover", settings)
     await e.coordinator.client.async_set_cover_settings(settings)
 
 async def _set_cover_protection(e, v):
-    settings = _cover(e.coordinator)
+    settings = await e.coordinator.client.async_get_cover_settings()
     settings.protection = v
     await _commit_cover(e, settings)
 
 async def _set_cover_pump_open(e, v):
-    settings = _cover(e.coordinator)
+    settings = await e.coordinator.client.async_get_cover_settings()
     settings.pump_open = v
     await _commit_cover(e, settings)
 
 async def _set_cover_pump_close(e, v):
-    settings = _cover(e.coordinator)
+    settings = await e.coordinator.client.async_get_cover_settings()
     settings.pump_close = v
     await _commit_cover(e, settings)
 
 async def _set_cover_pump_low_speed(e, v):
-    settings = _cover(e.coordinator)
+    settings = await e.coordinator.client.async_get_cover_settings()
     settings.pump_low_speed = v
     await _commit_cover(e, settings)
 

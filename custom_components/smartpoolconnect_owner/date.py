@@ -41,7 +41,7 @@ async def _commit_backwash(e, settings: PoolBackwashSettings) -> None:
     _save_pending(e.coordinator, "backwash", settings)
     await e.coordinator.client.async_set_backwash_settings(settings)
 async def _set_backwash_start_date(e, value: str):
-    s = _backwash(e.coordinator); s.start_date = value
+    s = await e.coordinator.client.async_get_backwash_settings(); s.start_date = value
     await _commit_backwash(e, s)
 DATES = (SmartPoolDateDescription(key="backwash_start_date", translation_key="backwash_start_date", value_fn=lambda s: s.backwash_start_date, set_fn=_set_backwash_start_date),)
 
