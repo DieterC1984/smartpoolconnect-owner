@@ -13,24 +13,30 @@ from .entity import SmartPoolConnectEntity
 class SmartPoolNumberDescription(NumberEntityDescription):
     value_fn: Callable[[PoolStatus], float | None]
     set_fn: Callable[["SmartPoolNumber", float], Any]
-async def _set_ph_target(e,v):
-    d=e.coordinator.data
-    if d: await e.coordinator.client.async_set_ph_settings(target=v,dosing_time=d.ph_dosing_time if d.ph_dosing_time is not None else 60,pausing_time=d.ph_pausing_time if d.ph_pausing_time is not None else 5)
-async def _set_ph_dosing_time(e,v):
-    d=e.coordinator.data
-    if d: await e.coordinator.client.async_set_ph_settings(target=d.ph_target if d.ph_target is not None else 7.2,dosing_time=v,pausing_time=d.ph_pausing_time if d.ph_pausing_time is not None else 5)
-async def _set_ph_pausing_time(e,v):
-    d=e.coordinator.data
-    if d: await e.coordinator.client.async_set_ph_settings(target=d.ph_target if d.ph_target is not None else 7.2,dosing_time=d.ph_dosing_time if d.ph_dosing_time is not None else 60,pausing_time=v)
-async def _set_rx_target(e,v):
-    d=e.coordinator.data
-    if d: await e.coordinator.client.async_set_rx_settings(target=v,dosing_time=d.rx_dosing_time if d.rx_dosing_time is not None else 90,pausing_time=d.rx_pausing_time if d.rx_pausing_time is not None else 5)
-async def _set_rx_dosing_time(e,v):
-    d=e.coordinator.data
-    if d: await e.coordinator.client.async_set_rx_settings(target=d.rx_target if d.rx_target is not None else 700,dosing_time=v,pausing_time=d.rx_pausing_time if d.rx_pausing_time is not None else 5)
-async def _set_rx_pausing_time(e,v):
-    d=e.coordinator.data
-    if d: await e.coordinator.client.async_set_rx_settings(target=d.rx_target if d.rx_target is not None else 700,dosing_time=d.rx_dosing_time if d.rx_dosing_time is not None else 90,pausing_time=v)
+async def _set_ph_target(e, v):
+    await e.coordinator.client.async_set_ph_settings(target=v)
+
+
+async def _set_ph_dosing_time(e, v):
+    await e.coordinator.client.async_set_ph_settings(dosing_time=v)
+
+
+async def _set_ph_pausing_time(e, v):
+    await e.coordinator.client.async_set_ph_settings(pausing_time=v)
+
+
+async def _set_rx_target(e, v):
+    await e.coordinator.client.async_set_rx_settings(target=v)
+
+
+async def _set_rx_dosing_time(e, v):
+    await e.coordinator.client.async_set_rx_settings(dosing_time=v)
+
+
+async def _set_rx_pausing_time(e, v):
+    await e.coordinator.client.async_set_rx_settings(pausing_time=v)
+
+
 def _backwash_from_data(d: PoolStatus) -> PoolBackwashSettings:
     return PoolBackwashSettings(interval=d.backwash_interval, rinse_duration=d.backwash_rinse_duration, backwash_duration=d.backwash_duration, pump_speed=d.backwash_pump_speed, start_date=d.backwash_start_date, start_time=d.backwash_start_time)
 def _backwash(coordinator) -> PoolBackwashSettings:

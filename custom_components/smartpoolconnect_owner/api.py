@@ -7,12 +7,13 @@ import json
 import logging
 import re
 import secrets
+from time import monotonic
 from typing import Any
 from urllib.parse import urljoin
 
 import aiohttp
 
-from .const import DEFAULT_BASE_URL, DEFAULT_OAUTH_BASE_URL, PUMP_SPEEDS
+from .const import DEFAULT_BASE_URL, DEFAULT_OAUTH_BASE_URL, PUMP_SPEEDS, SETTINGS_CACHE_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,6 +126,14 @@ class PoolPhSettings:
     target: float | None = None
     dosing_time: float | None = None
     pausing_time: float | None = None
+    dosing_type: str | None = None
+    gain: str | None = None
+    offset: str | None = None
+    probe_offset: str | None = None
+    overdose_alert: str | None = None
+    min_water_temp: str | None = None
+    hysteresis: str | None = None
+    valid: bool = False
 
 
 @dataclass(slots=True)
@@ -132,6 +141,11 @@ class PoolRxSettings:
     target: float | None = None
     dosing_time: float | None = None
     pausing_time: float | None = None
+    overdose_alert: str | None = None
+    min_water_temp: str | None = None
+    probe: str | None = None
+    offset: str | None = None
+    valid: bool = False
 
 
 @dataclass(slots=True)
@@ -142,6 +156,9 @@ class PoolLightingSettings:
     schedule_start_time: str | None = None
     schedule_stop_time: str | None = None
     schedule_days: tuple[str, ...] = ()
+    dimming: str | None = None
+    switch_pulse: str | None = None
+    valid: bool = False
 
 
 @dataclass(slots=True)
@@ -236,7 +253,10 @@ def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None
     context = text[max(0, idx - 1000):idx + 5000]
     try:
         name_match = re.search(rf'"{re.escape(pool_id)}","([^"]+)"', context)
-        ph_match = re.search(r'"metrics".*?"actual",([0-9]+(?:\.[0-9]+)?)', context, re.DOTALL)
+        ph_match = re.search(
+            r'"metrics",\{[^{}]*\},"timestamp",[0-9]+,(-?[0-9]+(?:\.[0-9]+)?)',
+            context,
+        )
         rx_match = re.search(r'"cl".*?},([0-9]+(?:\.[0-9]+)?),', context, re.DOTALL)
         name = name_match.group(1) if name_match else None
         ph = _as_float(ph_match.group(1)) if ph_match else None
@@ -348,6 +368,169 @@ def _extract_any_bool(text: str, *keys: str) -> bool | None:
                     return value
     return None
 
+
+
+def _extract_devalue_ph_settings(text: str) -> PoolPhSettings:
+    """Extract complete pH controller settings from Remix/devalue route data."""
+    try:
+        values = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return PoolPhSettings()
+    if not isinstance(values, list):
+        return PoolPhSettings()
+    required = {"type", "gain", "target", "offset", "dosing_time", "pausing_time", "probe_offset", "overdose_alert", "min_water_temp", "hysteresis"}
+    def resolve(value: Any) -> Any:
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
+            return values[value]
+        return value
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        decoded: dict[str, Any] = {}
+        for raw_key, raw_value in item.items():
+            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
+                key = resolve(int(raw_key[1:]))
+                if isinstance(key, str):
+                    decoded[key] = resolve(raw_value)
+            elif isinstance(raw_key, str):
+                decoded[raw_key] = resolve(raw_value)
+        if not required.issubset(decoded):
+            continue
+        if any(isinstance(decoded[key], (dict, list)) for key in required):
+            continue
+        numeric = {key: _as_float(decoded[key]) for key in required - {"type"}}
+        dosing_type = decoded["type"]
+        if any(value is None for value in numeric.values()) or not isinstance(dosing_type, str) or not dosing_type:
+            continue
+        return PoolPhSettings(target=numeric["target"], dosing_time=numeric["dosing_time"], pausing_time=numeric["pausing_time"], dosing_type=dosing_type, gain=str(decoded["gain"]), offset=str(decoded["offset"]), probe_offset=str(decoded["probe_offset"]), overdose_alert=str(decoded["overdose_alert"]), min_water_temp=str(decoded["min_water_temp"]), hysteresis=str(decoded["hysteresis"]), valid=True)
+    return PoolPhSettings()
+
+def _extract_devalue_rx_settings(text: str) -> PoolRxSettings:
+    """Extract complete Rx controller settings from Remix/devalue route data."""
+    try:
+        values = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return PoolRxSettings()
+    if not isinstance(values, list):
+        return PoolRxSettings()
+
+    def resolve(value: Any) -> Any:
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
+            return values[value]
+        return value
+
+    def decode_object(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        decoded: dict[str, Any] = {}
+        for raw_key, raw_value in item.items():
+            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
+                key = resolve(int(raw_key[1:]))
+                if isinstance(key, str):
+                    decoded[key] = resolve(raw_value)
+            elif isinstance(raw_key, str):
+                decoded[raw_key] = resolve(raw_value)
+        return decoded
+
+    required = {"dosing_time", "pausing_time", "overdose_alert", "min_water_temp", "rx"}
+    for item in values:
+        decoded = decode_object(item)
+        if not decoded or not required.issubset(decoded):
+            continue
+        if any(isinstance(decoded[key], list) for key in required):
+            continue
+
+        rx_config = decode_object(decoded["rx"])
+        if not rx_config or not {"target", "probe", "offset"}.issubset(rx_config):
+            continue
+
+        dosing_time = _as_float(decoded["dosing_time"])
+        pausing_time = _as_float(decoded["pausing_time"])
+        overdose_alert = _as_float(decoded["overdose_alert"])
+        min_water_temp = _as_float(decoded["min_water_temp"])
+        target = _as_float(rx_config["target"])
+        probe = _as_float(rx_config["probe"])
+        offset = _as_float(rx_config["offset"])
+        if any(value is None for value in (dosing_time, pausing_time, overdose_alert, min_water_temp, target, probe, offset)):
+            continue
+
+        return PoolRxSettings(
+            target=target,
+            dosing_time=dosing_time,
+            pausing_time=pausing_time,
+            overdose_alert=str(decoded["overdose_alert"]),
+            min_water_temp=str(decoded["min_water_temp"]),
+            probe=str(rx_config["probe"]),
+            offset=str(rx_config["offset"]),
+            valid=True,
+        )
+
+    return PoolRxSettings()
+
+
+def _extract_devalue_lighting_settings(text: str) -> PoolLightingSettings:
+    """Extract complete lighting settings from Remix/devalue route data."""
+    try:
+        values = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return PoolLightingSettings()
+    if not isinstance(values, list):
+        return PoolLightingSettings()
+
+    def resolve(value: Any) -> Any:
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
+            return values[value]
+        return value
+
+    def decode_object(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        decoded: dict[str, Any] = {}
+        for raw_key, raw_value in item.items():
+            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
+                key = resolve(int(raw_key[1:]))
+                if isinstance(key, str):
+                    decoded[key] = resolve(raw_value)
+            elif isinstance(raw_key, str):
+                decoded[raw_key] = resolve(raw_value)
+        return decoded
+
+    required = {"dimming", "switch_pulse", "cover_disabled", "always_active", "schedule"}
+    for item in values:
+        decoded = decode_object(item)
+        if not decoded or not required.issubset(decoded):
+            continue
+        dimming = _as_float(decoded["dimming"])
+        switch_pulse = _as_float(decoded["switch_pulse"])
+        cover_disabled = _as_bool(decoded["cover_disabled"])
+        always_active = _as_bool(decoded["always_active"])
+        schedule = decode_object(decoded["schedule"])
+        if not schedule or not {"start_time", "stop_time", "enabled", "days"}.issubset(schedule):
+            continue
+        schedule_enabled = _as_bool(schedule["enabled"])
+        start_time = schedule["start_time"]
+        stop_time = schedule["stop_time"]
+        days = schedule["days"]
+        if (
+            dimming is None or switch_pulse is None
+            or cover_disabled is None or always_active is None
+            or schedule_enabled is None
+            or not isinstance(start_time, str) or not isinstance(stop_time, str)
+            or not isinstance(days, list)
+        ):
+            continue
+        return PoolLightingSettings(
+            always_active=always_active,
+            cover_disabled=cover_disabled,
+            schedule_enabled=schedule_enabled,
+            schedule_start_time=start_time,
+            schedule_stop_time=stop_time,
+            schedule_days=tuple(str(day).lower() for day in days),
+            dimming=str(decoded["dimming"]),
+            switch_pulse=str(decoded["switch_pulse"]),
+            valid=True,
+        )
+    return PoolLightingSettings()
 
 def _extract_devalue_cover_settings(text: str) -> PoolCoverSettings:
     """Extract cover settings from Remix/devalue serialized route data.
@@ -513,6 +696,10 @@ class SmartPoolConnectClient:
         self.base_url = base_url.rstrip("/")
         self.oauth_base_url = oauth_base_url.rstrip("/")
         self._session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
+        self._pool_route_text: str | None = None
+        self._pool_route_cached_at: float = 0.0
+        self._settings_bundle: tuple[Any, ...] | None = None
+        self._settings_bundle_cached_at: float = 0.0
 
     async def close(self) -> None:
         await self._session.close()
@@ -676,6 +863,21 @@ class SmartPoolConnectClient:
         except json.JSONDecodeError:
             return {"raw": text}
 
+    def _invalidate_settings_cache(self) -> None:
+        self._pool_route_text = None
+        self._pool_route_cached_at = 0.0
+        self._settings_bundle = None
+        self._settings_bundle_cached_at = 0.0
+
+    async def _get_pool_route_text(self, *, force_refresh: bool = False) -> str:
+        now = monotonic()
+        if not force_refresh and self._pool_route_text is not None and now - self._pool_route_cached_at < SETTINGS_CACHE_INTERVAL:
+            return self._pool_route_text
+        text = await self._request_text_with_reauth("GET", f"/pool/{self.pool_id}.data")
+        self._pool_route_text = text
+        self._pool_route_cached_at = now
+        return text
+
     async def _get_current_from_pool_data(self) -> tuple[str | None, float | None, float | None]:
         try:
             text = await self._request_text("GET", "/pool.data")
@@ -684,39 +886,120 @@ class SmartPoolConnectClient:
             return None, None, None
         return _extract_current_from_pool_data(text, self.pool_id)
 
-    async def async_get_ph_settings(self) -> PoolPhSettings:
+    async def async_get_ph_settings(self, *, force_refresh: bool = False) -> PoolPhSettings:
         try:
-            text = await self._request_text("GET", f"/pool/{self.pool_id}/ph/")
+            return _extract_devalue_ph_settings(await self._get_pool_route_text(force_refresh=force_refresh))
         except SmartPoolConnectError:
-            _LOGGER.debug("Could not read pH settings page", exc_info=True)
+            _LOGGER.debug("Could not read pH settings from pool route data", exc_info=True)
             return PoolPhSettings()
-        return PoolPhSettings(target=_as_float(_extract_input_value(text, "target")), dosing_time=_as_float(_extract_input_value(text, "dosing_time")), pausing_time=_as_float(_extract_input_value(text, "pausing_time")))
 
-    async def async_set_ph_settings(self, *, target: float, dosing_time: float, pausing_time: float) -> None:
-        await self._request_json("PATCH", f"/pool/{self.pool_id}/ph.data", data={"type": "neg", "gain": "1.0529999732971191", "target": str(target), "offset": "0.18000000715255737", "dosing_time": str(int(dosing_time)), "pausing_time": str(int(pausing_time)), "probe_offset": "0", "overdose_alert": "0", "min_water_temp": "2", "hysteresis": "0.2"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+    async def async_set_ph_settings(
+        self,
+        *,
+        target: float | None = None,
+        dosing_time: float | None = None,
+        pausing_time: float | None = None,
+    ) -> None:
+        current = await self.async_get_ph_settings(force_refresh=True)
+        if not current.valid:
+            raise SmartPoolConnectError(
+                "pH settings update aborted because the current controller settings could not be read completely"
+            )
 
-    async def async_get_rx_settings(self) -> PoolRxSettings:
+        await self._request_json(
+            "PATCH",
+            f"/pool/{self.pool_id}/ph.data",
+            data={
+                "type": current.dosing_type,
+                "gain": current.gain,
+                "target": str(target if target is not None else current.target),
+                "offset": current.offset,
+                "dosing_time": str(int(dosing_time if dosing_time is not None else current.dosing_time)),
+                "pausing_time": str(int(pausing_time if pausing_time is not None else current.pausing_time)),
+                "probe_offset": current.probe_offset,
+                "overdose_alert": current.overdose_alert,
+                "min_water_temp": current.min_water_temp,
+                "hysteresis": current.hysteresis,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        )
+        self._invalidate_settings_cache()
+
+    async def async_get_rx_settings(self, *, force_refresh: bool = False) -> PoolRxSettings:
         try:
-            text = await self._request_text("GET", f"/pool/{self.pool_id}/cl/")
+            return _extract_devalue_rx_settings(await self._get_pool_route_text(force_refresh=force_refresh))
         except SmartPoolConnectError:
-            _LOGGER.debug("Could not read Rx settings page", exc_info=True)
+            _LOGGER.debug("Could not read Rx settings from pool route data", exc_info=True)
             return PoolRxSettings()
-        target = _extract_input_value(text, "rx.target") or _extract_input_value(text, "rx_target")
-        return PoolRxSettings(target=_as_float(target), dosing_time=_as_float(_extract_input_value(text, "dosing_time")), pausing_time=_as_float(_extract_input_value(text, "pausing_time")))
 
-    async def async_set_rx_settings(self, *, target: float, dosing_time: float, pausing_time: float) -> None:
-        await self._request_json("PUT", f"/pool/{self.pool_id}/cl.data", data={"dosing_time": str(int(dosing_time)), "pausing_time": str(int(pausing_time)), "overdose_alert": "0", "min_water_temp": "2", "rx.target": str(int(target)), "rx.probe": "0", "rx.offset": "-2"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+    async def async_set_rx_settings(
+        self,
+        *,
+        target: float | None = None,
+        dosing_time: float | None = None,
+        pausing_time: float | None = None,
+    ) -> None:
+        current = await self.async_get_rx_settings(force_refresh=True)
+        if not current.valid:
+            raise SmartPoolConnectError(
+                "Rx settings update aborted because the current controller settings could not be read completely"
+            )
 
-    async def async_get_lighting_settings(self) -> PoolLightingSettings:
+        await self._request_json(
+            "PUT",
+            f"/pool/{self.pool_id}/cl.data",
+            data={
+                "dosing_time": str(int(dosing_time if dosing_time is not None else current.dosing_time)),
+                "pausing_time": str(int(pausing_time if pausing_time is not None else current.pausing_time)),
+                "overdose_alert": current.overdose_alert,
+                "min_water_temp": current.min_water_temp,
+                "rx.target": str(int(target if target is not None else current.target)),
+                "rx.probe": current.probe,
+                "rx.offset": current.offset,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        )
+        self._invalidate_settings_cache()
+
+    async def async_get_lighting_settings(self, *, force_refresh: bool = False) -> PoolLightingSettings:
         try:
-            text = await self._request_text("GET", f"/pool/{self.pool_id}/lighting")
+            return _extract_devalue_lighting_settings(await self._get_pool_route_text(force_refresh=force_refresh))
         except SmartPoolConnectError:
-            _LOGGER.debug("Could not read lighting settings page", exc_info=True)
+            _LOGGER.debug("Could not read lighting settings from pool route data", exc_info=True)
             return PoolLightingSettings()
-        return PoolLightingSettings(always_active=_extract_bool_input(text, "always_active"), cover_disabled=_extract_bool_input(text, "cover_disabled"), schedule_enabled=_extract_bool_input(text, "schedule.enabled"), schedule_start_time=_extract_input_value(text, "schedule.start_time"), schedule_stop_time=_extract_input_value(text, "schedule.stop_time"), schedule_days=_extract_schedule_days(text))
 
-    async def async_set_lighting_settings(self, *, always_active: bool, cover_disabled: bool, schedule_enabled: bool, schedule_start_time: str, schedule_stop_time: str, schedule_days: tuple[str, ...]) -> None:
-        await self._request_json("PUT", f"/pool/{self.pool_id}/lighting.data", data={"dimming": "100", "switch_pulse": "1", "cover_disabled": "true" if cover_disabled else "false", "always_active": "true" if always_active else "false", "schedule.start_time": schedule_start_time, "schedule.stop_time": schedule_stop_time, "schedule.enabled": "true" if schedule_enabled else "false", "schedule.days": ",".join(schedule_days)}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+    async def async_set_lighting_settings(
+        self,
+        *,
+        always_active: bool | None = None,
+        cover_disabled: bool | None = None,
+        schedule_enabled: bool | None = None,
+        schedule_start_time: str | None = None,
+        schedule_stop_time: str | None = None,
+        schedule_days: tuple[str, ...] | None = None,
+    ) -> None:
+        current = await self.async_get_lighting_settings(force_refresh=True)
+        if not current.valid:
+            raise SmartPoolConnectError(
+                "Lighting settings update aborted because the current controller settings could not be read completely"
+            )
+
+        await self._request_json(
+            "PUT",
+            f"/pool/{self.pool_id}/lighting.data",
+            data={
+                "dimming": current.dimming,
+                "switch_pulse": current.switch_pulse,
+                "cover_disabled": "true" if (cover_disabled if cover_disabled is not None else current.cover_disabled) else "false",
+                "always_active": "true" if (always_active if always_active is not None else current.always_active) else "false",
+                "schedule.start_time": schedule_start_time if schedule_start_time is not None else current.schedule_start_time,
+                "schedule.stop_time": schedule_stop_time if schedule_stop_time is not None else current.schedule_stop_time,
+                "schedule.enabled": "true" if (schedule_enabled if schedule_enabled is not None else current.schedule_enabled) else "false",
+                "schedule.days": ",".join(schedule_days if schedule_days is not None else current.schedule_days),
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        )
+        self._invalidate_settings_cache()
 
     async def async_get_filter_settings(self) -> PoolFilterSettings:
         try:
@@ -755,6 +1038,7 @@ class SmartPoolConnectClient:
             "schedule_3.enabled": "true" if s3.enabled else "false",
             "schedule_3.days": ",".join(s3.days),
         }, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        self._invalidate_settings_cache()
 
     async def async_get_backwash_settings(self) -> PoolBackwashSettings:
         text = ""
@@ -776,9 +1060,11 @@ class SmartPoolConnectClient:
 
     async def async_set_backwash_settings(self, settings: PoolBackwashSettings) -> None:
         await self._request_json("PUT", f"/pool/{self.pool_id}/filter/backwash.data", data={"interval": str(int(settings.interval if settings.interval is not None else 30)), "rinse_duration": str(int(settings.rinse_duration if settings.rinse_duration is not None else 30)), "backwash_duration": str(int(settings.backwash_duration if settings.backwash_duration is not None else 90)), "pump_speed": settings.pump_speed or "high", "start_date": _format_smartpool_date(settings.start_date), "start_time": settings.start_time or "00:00"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        self._invalidate_settings_cache()
 
     async def async_start_backwash(self) -> None:
         await self._request_json("POST", f"/pool/{self.pool_id}/cmd.data", data={"exec": "backwash"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        self._invalidate_settings_cache()
 
     async def async_get_eco_valve_settings(self) -> PoolEcoValveSettings:
         """Read Eco Valve settings from SmartPoolConnect route data."""
@@ -832,6 +1118,7 @@ class SmartPoolConnectClient:
 
     async def async_set_eco_valve_settings(self, settings: PoolEcoValveSettings) -> None:
         await self._request_json("PUT", f"/pool/{self.pool_id}/filter/eco-valve.data", data={"regulation": settings.regulation if settings.regulation in ECO_VALVE_REGULATION_OPTIONS else "off", "start_time": settings.start_time or "00:00", "stop_time": settings.stop_time or "00:00"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        self._invalidate_settings_cache()
 
     async def async_get_cover_settings(self) -> PoolCoverSettings:
         """Read cover/deck settings from SmartPoolConnect route data."""
@@ -930,6 +1217,23 @@ class SmartPoolConnectClient:
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
         )
+        self._invalidate_settings_cache()
+
+    async def _get_settings_bundle(self) -> tuple[Any, ...]:
+        now = monotonic()
+        if self._settings_bundle is not None and now - self._settings_bundle_cached_at < SETTINGS_CACHE_INTERVAL:
+            return self._settings_bundle
+        self._settings_bundle = (
+            await self.async_get_ph_settings(),
+            await self.async_get_rx_settings(),
+            await self.async_get_lighting_settings(),
+            await self.async_get_filter_settings(),
+            await self.async_get_backwash_settings(),
+            await self.async_get_eco_valve_settings(),
+            await self.async_get_cover_settings(),
+        )
+        self._settings_bundle_cached_at = now
+        return self._settings_bundle
 
     async def async_get_status(self) -> PoolStatus:
         live = await self._request_json("GET", f"/api/live-status/{self.pool_id}")
@@ -938,13 +1242,7 @@ class SmartPoolConnectClient:
         except SmartPoolConnectError:
             pool = {}
         pool_name, ph, rx = await self._get_current_from_pool_data()
-        ph_settings = await self.async_get_ph_settings()
-        rx_settings = await self.async_get_rx_settings()
-        lighting_settings = await self.async_get_lighting_settings()
-        filter_settings = await self.async_get_filter_settings()
-        backwash_settings = await self.async_get_backwash_settings()
-        eco_valve_settings = await self.async_get_eco_valve_settings()
-        cover_settings = await self.async_get_cover_settings()
+        (ph_settings, rx_settings, lighting_settings, filter_settings, backwash_settings, eco_valve_settings, cover_settings) = await self._get_settings_bundle()
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
         fs3 = filter_settings.schedule_3 or PoolFilterSchedule()
@@ -972,8 +1270,7 @@ class SmartPoolConnectClient:
             water_temperature=water_temperature, water_temperature_target=_as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=_cover_state(cover), cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
 
     async def async_set_lighting(self, on: bool) -> None:
-        settings = await self.async_get_lighting_settings()
-        await self.async_set_lighting_settings(always_active=on, cover_disabled=settings.cover_disabled if settings.cover_disabled is not None else False, schedule_enabled=settings.schedule_enabled if settings.schedule_enabled is not None else False, schedule_start_time=settings.schedule_start_time or "20:00", schedule_stop_time=settings.schedule_stop_time or "23:59", schedule_days=settings.schedule_days)
+        await self.async_set_lighting_settings(always_active=on)
 
     async def async_set_pump_speed(self, speed: str) -> None:
         filter_settings = await self.async_get_filter_settings()
