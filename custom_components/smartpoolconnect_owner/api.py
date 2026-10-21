@@ -56,6 +56,7 @@ class PoolFilterSettings:
     schedule_1: PoolFilterSchedule | None = None
     schedule_2: PoolFilterSchedule | None = None
     schedule_3: PoolFilterSchedule | None = None
+    valid: bool = False
 
 
 @dataclass(slots=True)
@@ -170,6 +171,7 @@ class PoolCoverSettings:
     pump_low_speed: bool | None = None
     longitude: str | None = None
     latitude: str | None = None
+    valid: bool = False
 
 
 @dataclass(slots=True)
@@ -180,6 +182,7 @@ class PoolBackwashSettings:
     pump_speed: str | None = None
     start_date: str | None = None
     start_time: str | None = None
+    valid: bool = False
 
 
 @dataclass(slots=True)
@@ -187,6 +190,7 @@ class PoolEcoValveSettings:
     regulation: str | None = None
     start_time: str | None = None
     stop_time: str | None = None
+    valid: bool = False
 
 
 def _as_float(value: Any) -> float | None:
@@ -574,6 +578,7 @@ def _extract_devalue_cover_settings(text: str) -> PoolCoverSettings:
             # API pump_open = portal/HA Closing Pump.
             pump_close=_as_bool(decoded.get("pump_open")),
             pump_low_speed=_as_bool(decoded.get("pump_low_speed")),
+            valid=all(_as_bool(decoded.get(key)) is not None for key in required),
         )
 
     required = {"protection", "pump_open", "pump_close", "pump_low_speed"}
@@ -658,6 +663,7 @@ def _extract_devalue_eco_valve_settings(text: str) -> PoolEcoValveSettings:
             regulation=valid_regulation,
             start_time=valid_start_time,
             stop_time=valid_stop_time,
+            valid=(valid_regulation is not None and valid_start_time is not None and valid_stop_time is not None),
         )
 
         if candidate.regulation is not None and candidate.start_time is not None and candidate.stop_time is not None:
@@ -1006,64 +1012,65 @@ class SmartPoolConnectClient:
         self._invalidate_settings_cache()
 
     async def async_get_filter_settings(self) -> PoolFilterSettings:
-        try:
-            text = await self._request_text("GET", f"/pool/{self.pool_id}/filter")
-        except SmartPoolConnectError:
-            _LOGGER.debug("Could not read filter settings page", exc_info=True)
-            return PoolFilterSettings()
-        return PoolFilterSettings(
+        text = await self._request_text_with_reauth("GET", f"/pool/{self.pool_id}/filter")
+        settings = PoolFilterSettings(
             always_active=_extract_bool_input(text, "always_active"),
             pump_speed=_extract_select_value(text, "pump_speed"),
             schedule_1=PoolFilterSchedule(enabled=_extract_bool_input(text, "schedule_1.enabled"), pump_speed=_extract_select_value(text, "schedule_1.pump_speed"), start_time=_extract_input_value(text, "schedule_1.start_time"), stop_time=_extract_input_value(text, "schedule_1.stop_time"), days=_extract_toggle_days(text, "schedule_1.days")),
             schedule_2=PoolFilterSchedule(enabled=_extract_bool_input(text, "schedule_2.enabled"), pump_speed=_extract_select_value(text, "schedule_2.pump_speed"), start_time=_extract_input_value(text, "schedule_2.start_time"), stop_time=_extract_input_value(text, "schedule_2.stop_time"), days=_extract_toggle_days(text, "schedule_2.days")),
             schedule_3=PoolFilterSchedule(enabled=_extract_bool_input(text, "schedule_3.enabled"), pump_speed=_extract_select_value(text, "schedule_3.pump_speed"), start_time=_extract_input_value(text, "schedule_3.start_time"), stop_time=_extract_input_value(text, "schedule_3.stop_time"), days=_extract_toggle_days(text, "schedule_3.days")),
         )
+        schedules = (settings.schedule_1, settings.schedule_2, settings.schedule_3)
+        settings.valid = (
+            settings.always_active is not None
+            and settings.pump_speed in PUMP_SPEED_OPTIONS
+            and all(schedule is not None and schedule.enabled is not None and schedule.pump_speed in PUMP_SPEED_OPTIONS and schedule.start_time is not None and schedule.stop_time is not None for schedule in schedules)
+            and all(f'name="schedule_{idx}.days"' in text for idx in (1, 2, 3))
+        )
+        return settings
 
     async def async_set_filter_settings(self, settings: PoolFilterSettings) -> None:
-        s1 = settings.schedule_1 or PoolFilterSchedule()
-        s2 = settings.schedule_2 or PoolFilterSchedule()
-        s3 = settings.schedule_3 or PoolFilterSchedule()
+        if not settings.valid or not all((settings.schedule_1, settings.schedule_2, settings.schedule_3)):
+            raise SmartPoolConnectError("Filter settings update aborted because the current controller settings could not be read completely")
+        s1, s2, s3 = settings.schedule_1, settings.schedule_2, settings.schedule_3
         await self._request_json("PUT", f"/pool/{self.pool_id}/filter.data", data={
             "always_active": "true" if settings.always_active else "false",
-            "pump_speed": settings.pump_speed or "medium",
-            "schedule_1.pump_speed": s1.pump_speed or "low",
-            "schedule_1.start_time": s1.start_time or "00:00",
-            "schedule_1.stop_time": s1.stop_time or "08:00",
-            "schedule_1.enabled": "true" if s1.enabled else "false",
-            "schedule_1.days": ",".join(s1.days),
-            "schedule_2.pump_speed": s2.pump_speed or "high",
-            "schedule_2.start_time": s2.start_time or "12:00",
-            "schedule_2.stop_time": s2.stop_time or "14:00",
-            "schedule_2.enabled": "true" if s2.enabled else "false",
-            "schedule_2.days": ",".join(s2.days),
-            "schedule_3.pump_speed": s3.pump_speed or "low",
-            "schedule_3.start_time": s3.start_time or "18:00",
-            "schedule_3.stop_time": s3.stop_time or "22:00",
-            "schedule_3.enabled": "true" if s3.enabled else "false",
-            "schedule_3.days": ",".join(s3.days),
+            "pump_speed": settings.pump_speed,
+            "schedule_1.pump_speed": s1.pump_speed, "schedule_1.start_time": s1.start_time, "schedule_1.stop_time": s1.stop_time, "schedule_1.enabled": "true" if s1.enabled else "false", "schedule_1.days": ",".join(s1.days),
+            "schedule_2.pump_speed": s2.pump_speed, "schedule_2.start_time": s2.start_time, "schedule_2.stop_time": s2.stop_time, "schedule_2.enabled": "true" if s2.enabled else "false", "schedule_2.days": ",".join(s2.days),
+            "schedule_3.pump_speed": s3.pump_speed, "schedule_3.start_time": s3.start_time, "schedule_3.stop_time": s3.stop_time, "schedule_3.enabled": "true" if s3.enabled else "false", "schedule_3.days": ",".join(s3.days),
         }, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
         self._invalidate_settings_cache()
 
     async def async_get_backwash_settings(self) -> PoolBackwashSettings:
-        text = ""
-        try:
-            text = await self._request_text("GET", f"/pool/{self.pool_id}/filter/backwash")
-        except SmartPoolConnectError:
+        text: str | None = None
+        last_error: SmartPoolConnectError | None = None
+        for path in (f"/pool/{self.pool_id}/filter/backwash", f"/pool/{self.pool_id}/filter/backwash.data"):
             try:
-                text = await self._request_text("GET", f"/pool/{self.pool_id}/filter/backwash.data")
-            except SmartPoolConnectError:
-                _LOGGER.debug("Could not read backwash settings page", exc_info=True)
-                return PoolBackwashSettings()
+                text = await self._request_text_with_reauth("GET", path)
+                break
+            except (AuthenticationError, TransientServerError):
+                raise
+            except SmartPoolConnectError as err:
+                last_error = err
+        if text is None:
+            if last_error is not None:
+                raise last_error
+            return PoolBackwashSettings()
         interval = _extract_input_value(text, "interval") or _extract_remix_scalar(text, "interval")
         rinse_duration = _extract_input_value(text, "rinse_duration") or _extract_remix_scalar(text, "rinse_duration")
         backwash_duration = _extract_input_value(text, "backwash_duration") or _extract_remix_scalar(text, "backwash_duration")
-        pump_speed = _extract_select_value(text, "pump_speed") or _extract_input_value(text, "pump_speed") or _extract_remix_scalar(text, "pump_speed") or "high"
+        pump_speed = _extract_select_value(text, "pump_speed") or _extract_input_value(text, "pump_speed") or _extract_remix_scalar(text, "pump_speed")
         start_date = _extract_input_value(text, "start_date") or _extract_remix_scalar(text, "start_date")
         start_time = _extract_input_value(text, "start_time") or _extract_remix_scalar(text, "start_time")
-        return PoolBackwashSettings(interval=_as_float(interval), rinse_duration=_as_float(rinse_duration), backwash_duration=_as_float(backwash_duration), pump_speed=pump_speed if pump_speed in BACKWASH_PUMP_SPEED_OPTIONS else "high", start_date=_normalize_smartpool_date(start_date), start_time=start_time)
+        settings = PoolBackwashSettings(interval=_as_float(interval), rinse_duration=_as_float(rinse_duration), backwash_duration=_as_float(backwash_duration), pump_speed=pump_speed if pump_speed in BACKWASH_PUMP_SPEED_OPTIONS else None, start_date=_normalize_smartpool_date(start_date), start_time=start_time)
+        settings.valid = all(value is not None for value in (settings.interval, settings.rinse_duration, settings.backwash_duration, settings.pump_speed, settings.start_date, settings.start_time))
+        return settings
 
     async def async_set_backwash_settings(self, settings: PoolBackwashSettings) -> None:
-        await self._request_json("PUT", f"/pool/{self.pool_id}/filter/backwash.data", data={"interval": str(int(settings.interval if settings.interval is not None else 30)), "rinse_duration": str(int(settings.rinse_duration if settings.rinse_duration is not None else 30)), "backwash_duration": str(int(settings.backwash_duration if settings.backwash_duration is not None else 90)), "pump_speed": settings.pump_speed or "high", "start_date": _format_smartpool_date(settings.start_date), "start_time": settings.start_time or "00:00"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        if not settings.valid or any(value is None for value in (settings.interval, settings.rinse_duration, settings.backwash_duration, settings.pump_speed, settings.start_date, settings.start_time)):
+            raise SmartPoolConnectError("Backwash settings update aborted because the current controller settings could not be read completely")
+        await self._request_json("PUT", f"/pool/{self.pool_id}/filter/backwash.data", data={"interval": str(int(settings.interval)), "rinse_duration": str(int(settings.rinse_duration)), "backwash_duration": str(int(settings.backwash_duration)), "pump_speed": settings.pump_speed, "start_date": _format_smartpool_date(settings.start_date), "start_time": settings.start_time}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
         self._invalidate_settings_cache()
 
     async def async_start_backwash(self) -> None:
@@ -1071,143 +1078,75 @@ class SmartPoolConnectClient:
         self._invalidate_settings_cache()
 
     async def async_get_eco_valve_settings(self) -> PoolEcoValveSettings:
-        """Read Eco Valve settings from SmartPoolConnect route data."""
-        for path in (
-            f"/pool/{self.pool_id}/filter/eco-valve.data",
-            f"/pool/{self.pool_id}/filter/eco-valve",
-            f"/pool/{self.pool_id}/filter.data",
-            f"/pool/{self.pool_id}.data",
-            f"/pool/{self.pool_id}",
-            "/pool.data",
-        ):
+        last_error: SmartPoolConnectError | None = None
+        for path in (f"/pool/{self.pool_id}/filter/eco-valve.data", f"/pool/{self.pool_id}/filter/eco-valve", f"/pool/{self.pool_id}/filter.data", f"/pool/{self.pool_id}.data", f"/pool/{self.pool_id}", "/pool.data"):
             try:
-                text = await self._request_text("GET", path)
-            except SmartPoolConnectError:
-                _LOGGER.debug("Could not read eco valve settings from %s", path, exc_info=True)
+                text = await self._request_text_with_reauth("GET", path)
+            except (AuthenticationError, TransientServerError):
+                raise
+            except SmartPoolConnectError as err:
+                last_error = err
                 continue
-
             if not text:
                 continue
-
-            devalue_settings = _extract_devalue_eco_valve_settings(text)
-            if (
-                devalue_settings.regulation is not None
-                or devalue_settings.start_time is not None
-                or devalue_settings.stop_time is not None
-            ):
-                return devalue_settings
-
-            regulation = (
-                _extract_select_value(text, "regulation")
-                or _extract_input_value(text, "regulation")
-                or _extract_remix_scalar(text, "regulation")
-            )
-            start_time = (
-                _extract_input_value(text, "start_time")
-                or _extract_remix_scalar(text, "start_time")
-            )
-            stop_time = (
-                _extract_input_value(text, "stop_time")
-                or _extract_remix_scalar(text, "stop_time")
-            )
-
-            if regulation is not None or start_time is not None or stop_time is not None:
-                return PoolEcoValveSettings(
-                    regulation=regulation if regulation in ECO_VALVE_REGULATION_OPTIONS else None,
-                    start_time=start_time,
-                    stop_time=stop_time,
-                )
-
+            settings = _extract_devalue_eco_valve_settings(text)
+            if settings.valid:
+                return settings
+            regulation = _extract_select_value(text, "regulation") or _extract_input_value(text, "regulation") or _extract_remix_scalar(text, "regulation")
+            start_time = _extract_input_value(text, "start_time") or _extract_remix_scalar(text, "start_time")
+            stop_time = _extract_input_value(text, "stop_time") or _extract_remix_scalar(text, "stop_time")
+            settings = PoolEcoValveSettings(regulation=regulation if regulation in ECO_VALVE_REGULATION_OPTIONS else None, start_time=start_time, stop_time=stop_time)
+            settings.valid = settings.regulation is not None and settings.start_time is not None and settings.stop_time is not None
+            if settings.valid:
+                return settings
+        if last_error is not None:
+            raise last_error
         return PoolEcoValveSettings()
 
     async def async_set_eco_valve_settings(self, settings: PoolEcoValveSettings) -> None:
-        await self._request_json("PUT", f"/pool/{self.pool_id}/filter/eco-valve.data", data={"regulation": settings.regulation if settings.regulation in ECO_VALVE_REGULATION_OPTIONS else "off", "start_time": settings.start_time or "00:00", "stop_time": settings.stop_time or "00:00"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        if not settings.valid or settings.regulation not in ECO_VALVE_REGULATION_OPTIONS or settings.start_time is None or settings.stop_time is None:
+            raise SmartPoolConnectError("Eco Valve settings update aborted because the current controller settings could not be read completely")
+        await self._request_json("PUT", f"/pool/{self.pool_id}/filter/eco-valve.data", data={"regulation": settings.regulation, "start_time": settings.start_time, "stop_time": settings.stop_time}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
         self._invalidate_settings_cache()
 
     async def async_get_cover_settings(self) -> PoolCoverSettings:
-        """Read cover/deck settings from SmartPoolConnect route data."""
-        paths = (
-            f"/pool/{self.pool_id}/cover.data?_routes=root%2Cpool%2Froutes%2F%24pid.cover",
-            f"/pool/{self.pool_id}/cover.data",
-            f"/pool/{self.pool_id}/cover",
-            f"/pool/{self.pool_id}.data",
-            f"/pool/{self.pool_id}",
-            "/pool.data",
-        )
-        last_text = ""
-        for path in paths:
+        last_error: SmartPoolConnectError | None = None
+        for path in (f"/pool/{self.pool_id}/cover.data?_routes=root%2Cpool%2Froutes%2F%24pid.cover", f"/pool/{self.pool_id}/cover.data", f"/pool/{self.pool_id}/cover", f"/pool/{self.pool_id}.data", f"/pool/{self.pool_id}", "/pool.data"):
             try:
-                text = await self._request_text("GET", path)
-            except SmartPoolConnectError:
-                _LOGGER.debug("Could not read cover settings from %s", path, exc_info=True)
+                text = await self._request_text_with_reauth("GET", path)
+            except (AuthenticationError, TransientServerError):
+                raise
+            except SmartPoolConnectError as err:
+                last_error = err
                 continue
             if not text:
                 continue
-            last_text = text
-            devalue_settings = _extract_devalue_cover_settings(text)
-            if (
-                devalue_settings.protection is not None
-                or devalue_settings.pump_open is not None
-                or devalue_settings.pump_close is not None
-                or devalue_settings.pump_low_speed is not None
-            ):
-                return devalue_settings
-            fallback_settings = PoolCoverSettings(
+            settings = _extract_devalue_cover_settings(text)
+            if settings.valid:
+                settings.longitude = _extract_input_value(text, "location.longitude") or _extract_remix_scalar(text, "location.longitude") or _extract_remix_scalar(text, "longitude")
+                settings.latitude = _extract_input_value(text, "location.latitude") or _extract_remix_scalar(text, "location.latitude") or _extract_remix_scalar(text, "latitude")
+                return settings
+            settings = PoolCoverSettings(
                 protection=_extract_any_bool(text, "protection", "cover_protection"),
-                # API pump_close = portal/HA Opening Pump.
                 pump_open=_extract_any_bool(text, "pump_close", "opening_pump"),
-                # API pump_open = portal/HA Closing Pump.
                 pump_close=_extract_any_bool(text, "pump_open", "closing_pump"),
                 pump_low_speed=_extract_any_bool(text, "pump_low_speed", "opening_pump_slow"),
-                longitude=(
-                    _extract_input_value(text, "location.longitude")
-                    or _extract_remix_scalar(text, "location.longitude")
-                    or _extract_remix_scalar(text, "longitude")
-                ),
-                latitude=(
-                    _extract_input_value(text, "location.latitude")
-                    or _extract_remix_scalar(text, "location.latitude")
-                    or _extract_remix_scalar(text, "latitude")
-                ),
+                longitude=_extract_input_value(text, "location.longitude") or _extract_remix_scalar(text, "location.longitude") or _extract_remix_scalar(text, "longitude"),
+                latitude=_extract_input_value(text, "location.latitude") or _extract_remix_scalar(text, "location.latitude") or _extract_remix_scalar(text, "latitude"),
             )
-            if (
-                fallback_settings.protection is not None
-                or fallback_settings.pump_open is not None
-                or fallback_settings.pump_close is not None
-                or fallback_settings.pump_low_speed is not None
-            ):
-                return fallback_settings
-        if last_text:
-            return PoolCoverSettings(
-                longitude=(
-                    _extract_input_value(last_text, "location.longitude")
-                    or _extract_remix_scalar(last_text, "location.longitude")
-                    or _extract_remix_scalar(last_text, "longitude")
-                ),
-                latitude=(
-                    _extract_input_value(last_text, "location.latitude")
-                    or _extract_remix_scalar(last_text, "location.latitude")
-                    or _extract_remix_scalar(last_text, "latitude")
-                ),
-            )
+            settings.valid = all(value is not None for value in (settings.protection, settings.pump_open, settings.pump_close, settings.pump_low_speed))
+            if settings.valid:
+                return settings
+        if last_error is not None:
+            raise last_error
         return PoolCoverSettings()
 
     async def async_set_cover_settings(self, settings: PoolCoverSettings) -> None:
-        """Update cover/deck settings by sending the full portal payload.
-
-        PoolCoverSettings uses the Home Assistant/portal meaning:
-          - pump_open = Opening Pump
-          - pump_close = Closing Pump
-
-        SmartPoolConnect expects the two pump fields crossed in the PUT payload:
-          - Opening Pump writes to API pump_close.
-          - Closing Pump writes to API pump_open.
-        """
+        if not settings.valid or any(value is None for value in (settings.protection, settings.pump_open, settings.pump_close, settings.pump_low_speed)):
+            raise SmartPoolConnectError("Cover settings update aborted because the current controller settings could not be read completely")
         data: dict[str, str] = {
             "protection": "true" if settings.protection else "false",
-            # HA Closing Pump -> API pump_open.
             "pump_open": "true" if settings.pump_close else "false",
-            # HA Opening Pump -> API pump_close.
             "pump_close": "true" if settings.pump_open else "false",
             "pump_low_speed": "true" if settings.pump_low_speed else "false",
         }
@@ -1215,12 +1154,7 @@ class SmartPoolConnectClient:
             data["location.longitude"] = str(settings.longitude)
         if settings.latitude is not None:
             data["location.latitude"] = str(settings.latitude)
-        await self._request_json(
-            "PUT",
-            f"/pool/{self.pool_id}/cover.data",
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
-        )
+        await self._request_json("PUT", f"/pool/{self.pool_id}/cover.data", data=data, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
         self._invalidate_settings_cache()
 
     async def _get_settings_bundle(self) -> tuple[Any, ...]:
@@ -1278,7 +1212,8 @@ class SmartPoolConnectClient:
 
     async def async_set_pump_speed(self, speed: str) -> None:
         filter_settings = await self.async_get_filter_settings()
-        await self.async_set_filter_settings(PoolFilterSettings(always_active=filter_settings.always_active if filter_settings.always_active is not None else True, pump_speed=speed, schedule_1=filter_settings.schedule_1, schedule_2=filter_settings.schedule_2, schedule_3=filter_settings.schedule_3))
+        filter_settings.pump_speed = speed
+        await self.async_set_filter_settings(filter_settings)
 
     async def async_cover_open(self) -> None:
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_open", headers={"Content-Type": "application/json"})
