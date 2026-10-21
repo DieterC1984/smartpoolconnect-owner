@@ -836,8 +836,8 @@ class SmartPoolConnectClient:
             _LOGGER.exception("Could not dump cookie names")
 
     async def _validate_session(self) -> None:
-        """Validate authentication without loading all pool settings."""
-        await self._request_json(
+        """Validate authentication without triggering reauthentication."""
+        await self._request_text(
             "GET",
             f"/api/live-status/{self.pool_id}",
         )

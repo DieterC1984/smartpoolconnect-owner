@@ -7,12 +7,14 @@ from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
 
 from .api import (
+    AuthenticationError,
     PoolStatus,
     SmartPoolConnectClient,
     SmartPoolConnectError,
@@ -59,6 +61,8 @@ class SmartPoolConnectCoordinator(DataUpdateCoordinator[PoolStatus]):
 
             return data
 
+        except AuthenticationError as err:
+            raise ConfigEntryAuthFailed from err
         except TransientServerError as err:
             if self._last_good_data is not None:
                 _LOGGER.debug(
