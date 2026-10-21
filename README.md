@@ -60,33 +60,45 @@ This custom integration allows Home Assistant users to monitor and control suppo
 - Weekday-based lighting schedules
 - Cover-aware lighting behavior
 
-## Installation with HACS
+## Installation
+
+### Installation with HACS
+
+1. Open HACS in Home Assistant.
+2. Go to **Integrations**.
+3. Search for **SmartPoolConnect Owner**.
+4. Select **SmartPoolConnect Owner** and click **Download**.
+5. Restart Home Assistant.
+6. Go to **Settings → Devices & services → Add integration**.
+7. Search for **SmartPoolConnect Owner**.
+8. Follow the setup instructions.
+
+### Custom repository installation
+
+If you want to install a development or unreleased version:
 
 1. Open HACS in Home Assistant.
 2. Go to **Integrations**.
 3. Open the menu and choose **Custom repositories**.
-4. Add your GitHub repository URL.
+4. Add the SmartPoolConnect Owner GitHub repository URL.
 5. Set the category to **Integration**.
 6. Install **SmartPoolConnect Owner**.
 7. Restart Home Assistant.
 8. Go to **Settings → Devices & services → Add integration**.
 9. Search for **SmartPoolConnect Owner**.
 
-## Manual installation
+### Manual installation
 
 Copy this folder:
 
-```text
-custom_components/smartpoolconnect_owner
-```
+`custom_components/smartpoolconnect_owner`
 
 into your Home Assistant configuration directory:
 
-```text
-/config/custom_components/smartpoolconnect_owner
-```
+`/config/custom_components/smartpoolconnect_owner`
 
-Restart Home Assistant and add the integration from the UI.
+Restart Home Assistant and add **SmartPoolConnect Owner** from **Settings → Devices & services → Add integration**.
+
 
 ## Configuration
 
