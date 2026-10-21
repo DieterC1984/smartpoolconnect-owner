@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SmartPoolConnect Owner",
+        "description": "Log in with your SmartPoolConnect owner credentials and pool UUID.",
+        "data": {
+          "pool_id": "Pool UUID",
+          "username": "E-mail",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate SmartPoolConnect Owner",
+        "description": "Enter your new SmartPoolConnect password.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid login credentials.",
+      "cannot_connect": "Could not connect to SmartPoolConnect.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This pool is already configured.",
+      "reauth_successful": "Reauthentication was successful."
+    }
+  }
+}
