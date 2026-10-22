@@ -536,6 +536,90 @@ def _extract_devalue_lighting_settings(text: str) -> PoolLightingSettings:
         )
     return PoolLightingSettings()
 
+
+def _extract_devalue_filter_settings(text: str) -> PoolFilterSettings:
+    """Extract complete filter settings from Remix/devalue route data."""
+    try:
+        values = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return PoolFilterSettings()
+    if not isinstance(values, list):
+        return PoolFilterSettings()
+
+    def resolve(value: Any) -> Any:
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
+            return values[value]
+        return value
+
+    def decode_object(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        decoded: dict[str, Any] = {}
+        for raw_key, raw_value in item.items():
+            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
+                key = resolve(int(raw_key[1:]))
+                if isinstance(key, str):
+                    decoded[key] = resolve(raw_value)
+            elif isinstance(raw_key, str):
+                decoded[raw_key] = resolve(raw_value)
+        return decoded
+
+    def decode_schedule(item: Any) -> PoolFilterSchedule | None:
+        decoded = decode_object(item)
+        if not decoded or not {"pump_speed", "start_time", "stop_time", "enabled", "days"}.issubset(decoded):
+            return None
+        enabled = _as_bool(decoded["enabled"])
+        pump_speed = decoded["pump_speed"]
+        start_time = decoded["start_time"]
+        stop_time = decoded["stop_time"]
+        raw_days = decoded["days"]
+        if (
+            enabled is None
+            or pump_speed not in PUMP_SPEED_OPTIONS
+            or not isinstance(start_time, str)
+            or not isinstance(stop_time, str)
+            or not isinstance(raw_days, list)
+        ):
+            return None
+        days = tuple(
+            str(resolve(day)).lower()
+            for day in raw_days
+            if isinstance(resolve(day), str)
+        )
+        if any(day not in DAYS for day in days):
+            return None
+        return PoolFilterSchedule(
+            enabled=enabled,
+            pump_speed=pump_speed,
+            start_time=start_time,
+            stop_time=stop_time,
+            days=days,
+        )
+
+    required = {"always_active", "pump_speed", "schedule_1", "schedule_2", "schedule_3"}
+    for item in values:
+        decoded = decode_object(item)
+        if not decoded or not required.issubset(decoded):
+            continue
+        always_active = _as_bool(decoded["always_active"])
+        pump_speed = decoded["pump_speed"]
+        schedules = (
+            decode_schedule(decoded["schedule_1"]),
+            decode_schedule(decoded["schedule_2"]),
+            decode_schedule(decoded["schedule_3"]),
+        )
+        if always_active is None or pump_speed not in PUMP_SPEED_OPTIONS or any(schedule is None for schedule in schedules):
+            continue
+        return PoolFilterSettings(
+            always_active=always_active,
+            pump_speed=pump_speed,
+            schedule_1=schedules[0],
+            schedule_2=schedules[1],
+            schedule_3=schedules[2],
+            valid=True,
+        )
+    return PoolFilterSettings()
+
 def _extract_devalue_cover_settings(text: str) -> PoolCoverSettings:
     """Extract cover settings from Remix/devalue serialized route data.
 
@@ -836,8 +920,8 @@ class SmartPoolConnectClient:
             _LOGGER.exception("Could not dump cookie names")
 
     async def _validate_session(self) -> None:
-        """Validate authentication without triggering reauthentication."""
-        await self._request_text(
+        """Validate authentication without loading all pool settings."""
+        await self._request_json(
             "GET",
             f"/api/live-status/{self.pool_id}",
         )
@@ -1012,22 +1096,11 @@ class SmartPoolConnectClient:
         self._invalidate_settings_cache()
 
     async def async_get_filter_settings(self) -> PoolFilterSettings:
-        text = await self._request_text_with_reauth("GET", f"/pool/{self.pool_id}/filter")
-        settings = PoolFilterSettings(
-            always_active=_extract_bool_input(text, "always_active"),
-            pump_speed=_extract_select_value(text, "pump_speed"),
-            schedule_1=PoolFilterSchedule(enabled=_extract_bool_input(text, "schedule_1.enabled"), pump_speed=_extract_select_value(text, "schedule_1.pump_speed"), start_time=_extract_input_value(text, "schedule_1.start_time"), stop_time=_extract_input_value(text, "schedule_1.stop_time"), days=_extract_toggle_days(text, "schedule_1.days")),
-            schedule_2=PoolFilterSchedule(enabled=_extract_bool_input(text, "schedule_2.enabled"), pump_speed=_extract_select_value(text, "schedule_2.pump_speed"), start_time=_extract_input_value(text, "schedule_2.start_time"), stop_time=_extract_input_value(text, "schedule_2.stop_time"), days=_extract_toggle_days(text, "schedule_2.days")),
-            schedule_3=PoolFilterSchedule(enabled=_extract_bool_input(text, "schedule_3.enabled"), pump_speed=_extract_select_value(text, "schedule_3.pump_speed"), start_time=_extract_input_value(text, "schedule_3.start_time"), stop_time=_extract_input_value(text, "schedule_3.stop_time"), days=_extract_toggle_days(text, "schedule_3.days")),
+        text = await self._request_text_with_reauth(
+            "GET",
+            f"/pool/{self.pool_id}/filter.data?_routes=root%2Cpool%2Froutes%2F%24pid.filter",
         )
-        schedules = (settings.schedule_1, settings.schedule_2, settings.schedule_3)
-        settings.valid = (
-            settings.always_active is not None
-            and settings.pump_speed in PUMP_SPEED_OPTIONS
-            and all(schedule is not None and schedule.enabled is not None and schedule.pump_speed in PUMP_SPEED_OPTIONS and schedule.start_time is not None and schedule.stop_time is not None for schedule in schedules)
-            and all(f'name="schedule_{idx}.days"' in text for idx in (1, 2, 3))
-        )
-        return settings
+        return _extract_devalue_filter_settings(text)
 
     async def async_set_filter_settings(self, settings: PoolFilterSettings) -> None:
         if not settings.valid or not all((settings.schedule_1, settings.schedule_2, settings.schedule_3)):
