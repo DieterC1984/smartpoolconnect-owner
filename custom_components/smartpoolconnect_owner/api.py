@@ -33,7 +33,12 @@ class SmartPoolConnectError(Exception):
 
 
 class AuthenticationError(SmartPoolConnectError):
-    """Authentication failed."""
+    """Credentials or session authorisation failed."""
+
+
+class OAuthFlowError(SmartPoolConnectError):
+    """The SmartPoolConnect OAuth flow returned an unexpected response."""
+
 
 class TransientServerError(SmartPoolConnectError):
     """Temporary SmartPoolConnect backend error."""
@@ -831,29 +836,67 @@ class SmartPoolConnectClient:
         login_page_url = await self._get_login_page_url()
         async with self._session.get(login_page_url) as resp:
             await resp.text()
+            if resp.status in (502, 503, 504):
+                raise TransientServerError(
+                    f"OAuth login page failed: HTTP {resp.status}"
+                )
             if resp.status >= 400:
-                raise AuthenticationError(f"OAuth login page failed: HTTP {resp.status}")
+                raise OAuthFlowError(
+                    f"OAuth login page failed: HTTP {resp.status}"
+                )
+
         login_data_url = self._to_login_data_url(login_page_url)
-        device = base64.b64encode(str(secrets.randbelow(10_000_000_000)).encode()).decode()
-        async with self._session.post(login_data_url, data={"email": self.username, "password": self.password, "device": device}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Origin": self.oauth_base_url, "Referer": login_page_url}, allow_redirects=False) as resp:
+        device = base64.b64encode(
+            str(secrets.randbelow(10_000_000_000)).encode()
+        ).decode()
+        async with self._session.post(
+            login_data_url,
+            data={
+                "email": self.username,
+                "password": self.password,
+                "device": device,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "Origin": self.oauth_base_url,
+                "Referer": login_page_url,
+            },
+            allow_redirects=False,
+        ) as resp:
             login_text = await resp.text()
             login_location = resp.headers.get("Location")
             login_remix_redirect = resp.headers.get("X-Remix-Redirect")
+            if resp.status in (401, 403):
+                raise AuthenticationError(
+                    f"OAuth login.data rejected credentials: HTTP {resp.status}"
+                )
+            if resp.status in (502, 503, 504):
+                raise TransientServerError(
+                    f"OAuth login.data failed: HTTP {resp.status}"
+                )
             if resp.status not in (200, 202, 204, 301, 302, 303):
-                raise AuthenticationError(f"OAuth login.data failed: HTTP {resp.status}")
-        next_url = login_location or login_remix_redirect or self._extract_auth_redirect(login_text) or self._to_auth_data_url(login_page_url)
+                raise OAuthFlowError(
+                    f"OAuth login.data returned an unexpected status: HTTP {resp.status}"
+                )
+
+        next_url = (
+            login_location
+            or login_remix_redirect
+            or self._extract_auth_redirect(login_text)
+            or self._to_auth_data_url(login_page_url)
+        )
         if next_url.startswith("/"):
             next_url = urljoin(self.oauth_base_url, next_url)
         await self._follow_auth_redirect(next_url)
 
     def _to_login_data_url(self, login_page_url: str) -> str:
         if "/oauth/login?" not in login_page_url:
-            raise AuthenticationError(f"Unexpected OAuth login URL: {login_page_url}")
+            raise OAuthFlowError(f"Unexpected OAuth login URL: {login_page_url}")
         return login_page_url.replace("/oauth/login?", "/oauth/login.data?")
 
     def _to_auth_data_url(self, login_page_url: str) -> str:
         if "/oauth/login?" not in login_page_url:
-            raise AuthenticationError(f"Unexpected OAuth login URL: {login_page_url}")
+            raise OAuthFlowError(f"Unexpected OAuth login URL: {login_page_url}")
         return login_page_url.replace("/oauth/login?", "/oauth/auth.data?")
 
     async def _get_login_page_url(self) -> str:
@@ -867,13 +910,13 @@ class SmartPoolConnectClient:
                 if not location:
                     if "/oauth/login" in current_url:
                         return current_url
-                    raise AuthenticationError("Could not discover OAuth login URL: no redirect location")
+                    raise OAuthFlowError("Could not discover OAuth login URL: no redirect location")
                 if location.startswith("/"):
                     location = urljoin(current_url, location)
                 current_url = location
                 if "/oauth/login" in current_url:
                     return current_url
-        raise AuthenticationError("Could not discover OAuth login URL after redirects")
+        raise OAuthFlowError("Could not discover OAuth login URL after redirects")
 
     async def _follow_auth_redirect(self, redirect_to: str) -> None:
         current_url = redirect_to
@@ -887,13 +930,23 @@ class SmartPoolConnectClient:
                 if not next_url:
                     if resp.status in (200, 202, 204):
                         if "oauth.smartpoolconnect.eu" in current_url:
-                            raise AuthenticationError("OAuth flow ended on oauth domain without reaching www auth callback")
+                            raise OAuthFlowError("OAuth flow ended on oauth domain without reaching www auth callback")
                         return
-                    raise AuthenticationError(f"OAuth redirect failed: HTTP {resp.status}")
+                    if resp.status in (401, 403):
+                        raise AuthenticationError(
+                            f"OAuth redirect was not authorised: HTTP {resp.status}"
+                        )
+                    if resp.status in (502, 503, 504):
+                        raise TransientServerError(
+                            f"OAuth redirect failed: HTTP {resp.status}"
+                        )
+                    raise OAuthFlowError(
+                        f"OAuth redirect returned an unexpected status: HTTP {resp.status}"
+                    )
                 if next_url.startswith("/"):
                     next_url = urljoin(current_url, next_url)
                 current_url = next_url
-        raise AuthenticationError("Too many OAuth redirect steps")
+        raise OAuthFlowError("Too many OAuth redirect steps")
 
     @staticmethod
     def _extract_auth_redirect(text: str) -> str | None:
@@ -920,8 +973,8 @@ class SmartPoolConnectClient:
             _LOGGER.exception("Could not dump cookie names")
 
     async def _validate_session(self) -> None:
-        """Validate authentication without loading all pool settings."""
-        await self._request_json(
+        """Validate authentication without triggering reauthentication."""
+        await self._request_text(
             "GET",
             f"/api/live-status/{self.pool_id}",
         )
