@@ -5,7 +5,7 @@ If you find SmartPoolConnect Owner useful and would like to support its developm
 Support is completely optional. The integration and all its features remain free and open source.
 
 [❤️ Sponsor on GitHub](https://github.com/sponsors/DieterC1984)  
-[☕ Support via PayPal](https://www.paypal.com/paypalme/@DieterCeuppens)
+[☕ Support via PayPal](https://www.paypal.com/paypalme/DieterCeuppens)
 
 
 # SmartPoolConnect Owner
