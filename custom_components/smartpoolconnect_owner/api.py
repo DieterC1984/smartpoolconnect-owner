@@ -14,6 +14,7 @@ from urllib.parse import urljoin
 import aiohttp
 
 from .const import DEFAULT_BASE_URL, DEFAULT_OAUTH_BASE_URL, PUMP_SPEEDS, SETTINGS_CACHE_INTERVAL
+from .devalue import RemixDecodeError, UNDEFINED, decode_remix, route_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +62,9 @@ class PoolFilterSettings:
     schedule_1: PoolFilterSchedule | None = None
     schedule_2: PoolFilterSchedule | None = None
     schedule_3: PoolFilterSchedule | None = None
+    detected: bool = False
     valid: bool = False
+    missing_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -123,6 +126,7 @@ class PoolStatus:
     cover_pump_open: bool | None = None
     cover_pump_close: bool | None = None
     cover_pump_low_speed: bool | None = None
+    capabilities: frozenset[str] = frozenset()
     raw_live_status: dict[str, Any] | None = None
     raw_pool_status: dict[str, Any] | None = None
 
@@ -139,7 +143,9 @@ class PoolPhSettings:
     overdose_alert: str | None = None
     min_water_temp: str | None = None
     hysteresis: str | None = None
+    detected: bool = False
     valid: bool = False
+    missing_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -151,7 +157,9 @@ class PoolRxSettings:
     min_water_temp: str | None = None
     probe: str | None = None
     offset: str | None = None
+    detected: bool = False
     valid: bool = False
+    missing_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -164,7 +172,9 @@ class PoolLightingSettings:
     schedule_days: tuple[str, ...] = ()
     dimming: str | None = None
     switch_pulse: str | None = None
+    detected: bool = False
     valid: bool = False
+    missing_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -176,7 +186,9 @@ class PoolCoverSettings:
     pump_low_speed: bool | None = None
     longitude: str | None = None
     latitude: str | None = None
+    detected: bool = False
     valid: bool = False
+    missing_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -187,7 +199,9 @@ class PoolBackwashSettings:
     pump_speed: str | None = None
     start_date: str | None = None
     start_time: str | None = None
+    detected: bool = False
     valid: bool = False
+    missing_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -195,7 +209,9 @@ class PoolEcoValveSettings:
     regulation: str | None = None
     start_time: str | None = None
     stop_time: str | None = None
+    detected: bool = False
     valid: bool = False
+    missing_fields: tuple[str, ...] = ()
 
 
 def _as_float(value: Any) -> float | None:
@@ -247,521 +263,412 @@ def _pump_speed(value: Any) -> str | None:
         numeric = int(value)
     except (TypeError, ValueError):
         return None
-    return PUMP_SPEEDS.get(numeric, {0: "off", 1: "low", 2: "medium", 3: "high", 4: "maximum"}.get(numeric))
+    return PUMP_SPEEDS.get(numeric)
 
 
 def _cover_state(value: Any) -> str | None:
     return {1: "open", 2: "closed", 3: "opening", 4: "closing", "open": "open", "closed": "closed", "opening": "opening", "closing": "closing"}.get(value)
 
 
-def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None, float | None, float | None]:
-    idx = text.find(pool_id)
-    if idx == -1:
-        _LOGGER.warning("POOL DATA: pool_id not found: %s", pool_id)
-        return None, None, None
-    context = text[max(0, idx - 1000):idx + 5000]
+def _decode_route_response(text: Any) -> Any | None:
+    """Decode one Remix response, returning None for malformed content."""
+    if not isinstance(text, str):
+        return text
     try:
-        name_match = re.search(rf'"{re.escape(pool_id)}","([^"]+)"', context)
-        ph_match = re.search(
-            r'"metrics",\{[^{}]*\},"timestamp",[0-9]+,(-?[0-9]+(?:\.[0-9]+)?)',
-            context,
-        )
-        rx_match = re.search(r'"cl".*?},([0-9]+(?:\.[0-9]+)?),', context, re.DOTALL)
-        name = name_match.group(1) if name_match else None
-        ph = _as_float(ph_match.group(1)) if ph_match else None
-        global _LAST_VALID_RX
-        rx = _as_float(rx_match.group(1)) if rx_match else None
-        if rx is not None:
-            if rx < RX_MIN_VALID or rx > RX_MAX_VALID:
-                _LOGGER.debug("Ignoring invalid Rx value %s, using previous valid value %s", rx, _LAST_VALID_RX)
-                rx = _LAST_VALID_RX
-            elif _LAST_VALID_RX is not None and abs(rx - _LAST_VALID_RX) > RX_MAX_DELTA:
-                _LOGGER.debug("Ignoring Rx spike %s -> %s, using previous valid value", _LAST_VALID_RX, rx)
-                rx = _LAST_VALID_RX
-            else:
-                _LAST_VALID_RX = rx
-        return name, round(ph, 2) if ph is not None else None, round(rx, 0) if rx is not None else None
-    except Exception:
-        _LOGGER.exception("Failed to extract pH/Rx from /pool.data")
-        return None, None, None
-
-
-def _extract_input_tag(text: str, name: str) -> str | None:
-    match = re.search(rf'<input\b[^>]*\bname="{re.escape(name)}"[^>]*>', text)
-    return match.group(0) if match else None
-
-
-def _extract_input_value(text: str, name: str) -> str | None:
-    tag = _extract_input_tag(text, name)
-    if not tag:
+        return decode_remix(text)
+    except RemixDecodeError:
+        _LOGGER.debug("Could not decode Remix route response", exc_info=True)
         return None
-    match = re.search(r'\bvalue="([^"]*)"', tag)
-    return match.group(1) if match else None
 
 
-def _extract_bool_input(text: str, name: str) -> bool | None:
-    tag = _extract_input_tag(text, name)
-    if not tag:
-        return None
-    return "checked" in tag.lower()
+def _route_entries(decoded: Any) -> list[tuple[str, Any]]:
+    if not isinstance(decoded, dict):
+        return []
+    entries: list[tuple[str, Any]] = []
+    for route_id, envelope in decoded.items():
+        if not isinstance(route_id, str) or not route_id.startswith("pool/routes/"):
+            continue
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        entries.append((route_id, data))
+    return entries
 
 
-def _parse_days(value: str | None) -> tuple[str, ...]:
-    if not value:
-        return ()
-    return tuple(day.strip().lower() for day in value.split(",") if day.strip())
+def _find_pool_record(decoded: Any, pool_id: str | None = None) -> dict[str, Any] | None:
+    """Find a pool by semantic fields rather than flattened slot numbers."""
+    direct = route_data(decoded, "pool/routes/$pid")
+    if isinstance(direct, dict):
+        if pool_id is None or direct.get("pid") == pool_id:
+            return direct
 
+    for _, data in _route_entries(decoded):
+        if not isinstance(data, dict):
+            continue
+        pools = data.get("pools")
+        items = pools.get("items") if isinstance(pools, dict) else None
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and (pool_id is None or item.get("pid") == pool_id):
+                    return item
 
-def _extract_toggle_days(text: str, name: str) -> tuple[str, ...]:
-    idx = text.find(f'name="{name}"')
-    if idx == -1:
-        return _parse_days(_extract_input_value(text, name))
-    segment = text[idx:idx + 12000]
-    day_map = {"Mon": "monday", "Tue": "tuesday", "Wed": "wednesday", "Thu": "thursday", "Fri": "friday", "Sat": "saturday", "Sun": "sunday"}
-    selected: list[str] = []
-    for match in re.finditer(r"<button\b([^>]*)>(.*?)</button>", segment, re.DOTALL):
-        attrs = match.group(1)
-        label = re.sub(r"<[^>]+>", "", match.group(2)).strip()
-        if ("aria-pressed=\"true\"" in attrs or "data-state=\"on\"" in attrs) and label in day_map:
-            selected.append(day_map[label])
-    return tuple(selected)
-
-
-def _extract_schedule_days(text: str) -> tuple[str, ...]:
-    return _extract_toggle_days(text, "schedule.days")
-
-
-def _extract_select_value(text: str, name: str) -> str | None:
-    idx = text.find(f'name="{name}"')
-    if idx == -1:
-        return None
-    segment = text[idx:idx + 5000]
-    selected = re.search(r'<option\b[^>]*\bselected(?:="[^"]*")?[^>]*\bvalue="([^"]+)"', segment)
-    if selected:
-        return selected.group(1)
-    selected = re.search(r'<option\b[^>]*\bvalue="([^"]+)"[^>]*\bselected', segment)
-    if selected:
-        return selected.group(1)
-    return _extract_input_value(text, name)
-
-
-def _extract_remix_scalar(text: str, key: str) -> str | None:
-    match = re.search(rf'"{re.escape(key)}",("[^"]*"|[0-9]+(?:\.[0-9]+)?|true|false)', text)
-    if not match:
-        return None
-    value = match.group(1)
-    if value.startswith('"') and value.endswith('"'):
-        return value[1:-1]
-    return value
-
-
-def _extract_any_bool(text: str, *keys: str) -> bool | None:
-    """Extract a boolean from HTML input, JSON-like Remix data, or JS payload."""
-    for key in keys:
-        value = _extract_bool_input(text, key)
-        if value is not None:
-            return value
-        value = _as_bool(_extract_remix_scalar(text, key))
-        if value is not None:
-            return value
-        patterns = (
-            rf'"{re.escape(key)}"\s*:\s*(true|false|1|0)',
-            rf"'{re.escape(key)}'\s*:\s*(true|false|1|0)",
-            rf'\b{re.escape(key)}\b\s*:\s*(true|false|1|0)',
-        )
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                value = _as_bool(match.group(1))
-                if value is not None:
-                    return value
+    # Generic final pass supports route-id changes while still requiring a
+    # pool-shaped record and, when supplied, an exact pool id.
+    stack = [decoded]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, (dict, list)):
+            continue
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(current, dict):
+            if (
+                isinstance(current.get("pid"), str)
+                and (pool_id is None or current.get("pid") == pool_id)
+                and any(key in current for key in ("ph", "cl", "filter", "temperature"))
+            ):
+                return current
+            stack.extend(current.values())
+        else:
+            stack.extend(current)
     return None
 
 
+def _module_and_config(
+    decoded: Any,
+    module: str,
+    *,
+    pool_id: str | None = None,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Return module presence and its write-complete config candidate."""
+    def module_present(payload: dict[str, Any]) -> bool:
+        if isinstance(payload.get("config"), dict):
+            return True
+        return any(
+            value not in (None, UNDEFINED, [], {})
+            for key in ("status", "metrics")
+            if (value := payload.get(key)) is not None
+        )
 
-def _extract_devalue_ph_settings(text: str) -> PoolPhSettings:
-    """Extract complete pH controller settings from Remix/devalue route data."""
-    try:
-        values = json.loads(text)
-    except (TypeError, json.JSONDecodeError):
-        return PoolPhSettings()
-    if not isinstance(values, list):
-        return PoolPhSettings()
+    pool = _find_pool_record(decoded, pool_id)
+    if isinstance(pool, dict) and module in pool:
+        payload = pool.get(module)
+        if isinstance(payload, dict):
+            config = payload.get("config")
+            return module_present(payload), config if isinstance(config, dict) else None
+        return False, None
+
+    for route_id, data in _route_entries(decoded):
+        if not isinstance(data, dict):
+            continue
+        payload: Any | None = None
+        if module in data:
+            payload = data[module]
+        elif module == "filter" and route_id.endswith("$pid.filter"):
+            payload = data
+        elif module == "backwash" and route_id.endswith("filter.backwash"):
+            payload = data.get("backwash")
+        elif module == "eco_valve" and route_id.endswith("filter.eco-valve"):
+            # A null v1_eco_valve explicitly means the capability is absent.
+            payload = data.get("v1_eco_valve")
+        elif module == "lighting" and route_id.endswith("$pid.lighting"):
+            payload = data.get("lighting") or data.get("v1_lighting")
+        elif module == "cover" and route_id.endswith("$pid.cover"):
+            payload = data.get("cover") or data.get("v1_cover")
+        elif module == "ph" and route_id.endswith("$pid.ph"):
+            payload = data.get("ph")
+        elif module == "cl" and route_id.endswith("$pid.cl"):
+            payload = data.get("cl")
+
+        if not isinstance(payload, dict):
+            continue
+        config = payload.get("config")
+        if isinstance(config, dict):
+            return True, config
+        if module == "filter" and all(key in payload for key in ("always_active", "pump_speed")):
+            return True, payload
+        return module_present(payload), None
+    return False, None
+
+
+def _is_present(value: Any) -> bool:
+    return value is not None and value is not UNDEFINED
+
+
+def _missing(config: dict[str, Any] | None, required: set[str]) -> tuple[str, ...]:
+    if config is None:
+        return tuple(sorted(required))
+    return tuple(sorted(key for key in required if key not in config or not _is_present(config[key])))
+
+
+def _valid_time(value: Any) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) else None
+
+
+def _valid_days(value: Any) -> tuple[str, ...] | None:
+    if not isinstance(value, list):
+        return None
+    days = tuple(str(day).lower() for day in value if isinstance(day, str))
+    if len(days) != len(value) or any(day not in DAYS for day in days):
+        return None
+    return days
+
+
+def _sanitize_rx(value: Any) -> float | None:
+    global _LAST_VALID_RX
+    rx = _as_float(value)
+    if rx is None:
+        return None
+    if rx < RX_MIN_VALID or rx > RX_MAX_VALID:
+        _LOGGER.debug("Ignoring invalid Rx value %s, using previous valid value %s", rx, _LAST_VALID_RX)
+        return _LAST_VALID_RX
+    if _LAST_VALID_RX is not None and abs(rx - _LAST_VALID_RX) > RX_MAX_DELTA:
+        _LOGGER.debug("Ignoring Rx spike %s -> %s, using previous valid value", _LAST_VALID_RX, rx)
+        return _LAST_VALID_RX
+    _LAST_VALID_RX = rx
+    return rx
+
+
+def _metric_actual(module: Any) -> float | None:
+    if not isinstance(module, dict):
+        return None
+    metrics = module.get("metrics")
+    if isinstance(metrics, dict):
+        return _as_float(metrics.get("actual"))
+    if isinstance(metrics, list):
+        candidates = [
+            item for item in metrics
+            if isinstance(item, dict) and _as_float(item.get("actual")) is not None
+        ]
+        if candidates:
+            latest = max(candidates, key=lambda item: _as_float(item.get("timestamp")) or float("-inf"))
+            return _as_float(latest.get("actual"))
+    return None
+
+
+def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None, float | None, float | None]:
+    decoded = _decode_route_response(text)
+    pool = _find_pool_record(decoded, pool_id)
+    if pool is None:
+        _LOGGER.warning("POOL DATA: pool_id not found: %s", pool_id)
+        return None, None, None
+    name = pool.get("name") if isinstance(pool.get("name"), str) else None
+    ph = _metric_actual(pool.get("ph"))
+    rx = _sanitize_rx(_metric_actual(pool.get("cl")))
+    return name, round(ph, 2) if ph is not None else None, round(rx, 0) if rx is not None else None
+
+
+def _extract_devalue_ph_settings(text: str, pool_id: str | None = None) -> PoolPhSettings:
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "ph", pool_id=pool_id)
     required = {"type", "gain", "target", "offset", "dosing_time", "pausing_time", "probe_offset", "overdose_alert", "min_water_temp", "hysteresis"}
-    def resolve(value: Any) -> Any:
-        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
-            return values[value]
-        return value
-    for item in values:
-        if not isinstance(item, dict):
-            continue
-        decoded: dict[str, Any] = {}
-        for raw_key, raw_value in item.items():
-            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
-                key = resolve(int(raw_key[1:]))
-                if isinstance(key, str):
-                    decoded[key] = resolve(raw_value)
-            elif isinstance(raw_key, str):
-                decoded[raw_key] = resolve(raw_value)
-        if not required.issubset(decoded):
-            continue
-        if any(isinstance(decoded[key], (dict, list)) for key in required):
-            continue
-        numeric = {key: _as_float(decoded[key]) for key in required - {"type"}}
-        dosing_type = decoded["type"]
-        if any(value is None for value in numeric.values()) or not isinstance(dosing_type, str) or not dosing_type:
-            continue
-        return PoolPhSettings(target=numeric["target"], dosing_time=numeric["dosing_time"], pausing_time=numeric["pausing_time"], dosing_type=dosing_type, gain=str(decoded["gain"]), offset=str(decoded["offset"]), probe_offset=str(decoded["probe_offset"]), overdose_alert=str(decoded["overdose_alert"]), min_water_temp=str(decoded["min_water_temp"]), hysteresis=str(decoded["hysteresis"]), valid=True)
-    return PoolPhSettings()
+    missing = list(_missing(config, required))
+    if config is None:
+        return PoolPhSettings(detected=detected, missing_fields=tuple(missing))
+    numeric_keys = required - {"type"}
+    numeric = {key: _as_float(config.get(key)) for key in numeric_keys}
+    dosing_type = config.get("type")
+    missing.extend(key for key, value in numeric.items() if value is None and key not in missing)
+    if (not isinstance(dosing_type, str) or not dosing_type) and "type" not in missing:
+        missing.append("type")
+    missing = sorted(set(missing))
+    return PoolPhSettings(
+        target=numeric["target"], dosing_time=numeric["dosing_time"], pausing_time=numeric["pausing_time"],
+        dosing_type=dosing_type if isinstance(dosing_type, str) and dosing_type else None,
+        gain=str(config["gain"]) if _is_present(config.get("gain")) else None,
+        offset=str(config["offset"]) if _is_present(config.get("offset")) else None,
+        probe_offset=str(config["probe_offset"]) if _is_present(config.get("probe_offset")) else None,
+        overdose_alert=str(config["overdose_alert"]) if _is_present(config.get("overdose_alert")) else None,
+        min_water_temp=str(config["min_water_temp"]) if _is_present(config.get("min_water_temp")) else None,
+        hysteresis=str(config["hysteresis"]) if _is_present(config.get("hysteresis")) else None,
+        detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
 
-def _extract_devalue_rx_settings(text: str) -> PoolRxSettings:
-    """Extract complete Rx controller settings from Remix/devalue route data."""
-    try:
-        values = json.loads(text)
-    except (TypeError, json.JSONDecodeError):
-        return PoolRxSettings()
-    if not isinstance(values, list):
-        return PoolRxSettings()
 
-    def resolve(value: Any) -> Any:
-        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
-            return values[value]
-        return value
-
-    def decode_object(item: Any) -> dict[str, Any] | None:
-        if not isinstance(item, dict):
-            return None
-        decoded: dict[str, Any] = {}
-        for raw_key, raw_value in item.items():
-            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
-                key = resolve(int(raw_key[1:]))
-                if isinstance(key, str):
-                    decoded[key] = resolve(raw_value)
-            elif isinstance(raw_key, str):
-                decoded[raw_key] = resolve(raw_value)
-        return decoded
-
+def _extract_devalue_rx_settings(text: str, pool_id: str | None = None) -> PoolRxSettings:
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "cl", pool_id=pool_id)
     required = {"dosing_time", "pausing_time", "overdose_alert", "min_water_temp", "rx"}
-    for item in values:
-        decoded = decode_object(item)
-        if not decoded or not required.issubset(decoded):
-            continue
-        if any(isinstance(decoded[key], list) for key in required):
-            continue
-
-        rx_config = decode_object(decoded["rx"])
-        if not rx_config or not {"target", "probe", "offset"}.issubset(rx_config):
-            continue
-
-        dosing_time = _as_float(decoded["dosing_time"])
-        pausing_time = _as_float(decoded["pausing_time"])
-        overdose_alert = _as_float(decoded["overdose_alert"])
-        min_water_temp = _as_float(decoded["min_water_temp"])
-        target = _as_float(rx_config["target"])
-        probe = _as_float(rx_config["probe"])
-        offset = _as_float(rx_config["offset"])
-        if any(value is None for value in (dosing_time, pausing_time, overdose_alert, min_water_temp, target, probe, offset)):
-            continue
-
-        return PoolRxSettings(
-            target=target,
-            dosing_time=dosing_time,
-            pausing_time=pausing_time,
-            overdose_alert=str(decoded["overdose_alert"]),
-            min_water_temp=str(decoded["min_water_temp"]),
-            probe=str(rx_config["probe"]),
-            offset=str(rx_config["offset"]),
-            valid=True,
-        )
-
-    return PoolRxSettings()
+    missing = list(_missing(config, required))
+    rx_config = config.get("rx") if isinstance(config, dict) else None
+    if not isinstance(rx_config, dict):
+        rx_config = None
+    else:
+        missing.extend(f"rx.{key}" for key in ("target", "probe", "offset") if not _is_present(rx_config.get(key)))
+    if config is None:
+        return PoolRxSettings(detected=detected, missing_fields=tuple(sorted(set(missing))))
+    dosing_time = _as_float(config.get("dosing_time"))
+    pausing_time = _as_float(config.get("pausing_time"))
+    overdose_alert = _as_float(config.get("overdose_alert"))
+    min_water_temp = _as_float(config.get("min_water_temp"))
+    target = _as_float(rx_config.get("target")) if rx_config else None
+    probe = _as_float(rx_config.get("probe")) if rx_config else None
+    offset = _as_float(rx_config.get("offset")) if rx_config else None
+    for key, value in (("dosing_time", dosing_time), ("pausing_time", pausing_time), ("overdose_alert", overdose_alert), ("min_water_temp", min_water_temp), ("rx.target", target), ("rx.probe", probe), ("rx.offset", offset)):
+        if value is None:
+            missing.append(key)
+    missing = sorted(set(missing))
+    return PoolRxSettings(
+        target=target, dosing_time=dosing_time, pausing_time=pausing_time,
+        overdose_alert=str(config["overdose_alert"]) if _is_present(config.get("overdose_alert")) else None,
+        min_water_temp=str(config["min_water_temp"]) if _is_present(config.get("min_water_temp")) else None,
+        probe=str(rx_config["probe"]) if rx_config and _is_present(rx_config.get("probe")) else None,
+        offset=str(rx_config["offset"]) if rx_config and _is_present(rx_config.get("offset")) else None,
+        detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
 
 
-def _extract_devalue_lighting_settings(text: str) -> PoolLightingSettings:
-    """Extract complete lighting settings from Remix/devalue route data."""
-    try:
-        values = json.loads(text)
-    except (TypeError, json.JSONDecodeError):
-        return PoolLightingSettings()
-    if not isinstance(values, list):
-        return PoolLightingSettings()
-
-    def resolve(value: Any) -> Any:
-        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
-            return values[value]
-        return value
-
-    def decode_object(item: Any) -> dict[str, Any] | None:
-        if not isinstance(item, dict):
-            return None
-        decoded: dict[str, Any] = {}
-        for raw_key, raw_value in item.items():
-            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
-                key = resolve(int(raw_key[1:]))
-                if isinstance(key, str):
-                    decoded[key] = resolve(raw_value)
-            elif isinstance(raw_key, str):
-                decoded[raw_key] = resolve(raw_value)
-        return decoded
-
+def _extract_devalue_lighting_settings(text: str, pool_id: str | None = None) -> PoolLightingSettings:
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "lighting", pool_id=pool_id)
     required = {"dimming", "switch_pulse", "cover_disabled", "always_active", "schedule"}
-    for item in values:
-        decoded = decode_object(item)
-        if not decoded or not required.issubset(decoded):
-            continue
-        dimming = _as_float(decoded["dimming"])
-        switch_pulse = _as_float(decoded["switch_pulse"])
-        cover_disabled = _as_bool(decoded["cover_disabled"])
-        always_active = _as_bool(decoded["always_active"])
-        schedule = decode_object(decoded["schedule"])
-        if not schedule or not {"start_time", "stop_time", "enabled", "days"}.issubset(schedule):
-            continue
-        schedule_enabled = _as_bool(schedule["enabled"])
-        start_time = schedule["start_time"]
-        stop_time = schedule["stop_time"]
-        days = schedule["days"]
-        if (
-            dimming is None or switch_pulse is None
-            or cover_disabled is None or always_active is None
-            or schedule_enabled is None
-            or not isinstance(start_time, str) or not isinstance(stop_time, str)
-            or not isinstance(days, list)
-        ):
-            continue
-        return PoolLightingSettings(
-            always_active=always_active,
-            cover_disabled=cover_disabled,
-            schedule_enabled=schedule_enabled,
-            schedule_start_time=start_time,
-            schedule_stop_time=stop_time,
-            schedule_days=tuple(str(day).lower() for day in days),
-            dimming=str(decoded["dimming"]),
-            switch_pulse=str(decoded["switch_pulse"]),
-            valid=True,
-        )
-    return PoolLightingSettings()
+    missing = list(_missing(config, required))
+    schedule = config.get("schedule") if isinstance(config, dict) else None
+    if not isinstance(schedule, dict):
+        schedule = None
+    else:
+        missing.extend(f"schedule.{key}" for key in ("start_time", "stop_time", "enabled", "days") if not _is_present(schedule.get(key)))
+    if config is None:
+        return PoolLightingSettings(detected=detected, missing_fields=tuple(sorted(set(missing))))
+    dimming = _as_float(config.get("dimming"))
+    switch_pulse = _as_float(config.get("switch_pulse"))
+    cover_disabled = _as_bool(config.get("cover_disabled"))
+    always_active = _as_bool(config.get("always_active"))
+    schedule_enabled = _as_bool(schedule.get("enabled")) if schedule else None
+    start_time = _valid_time(schedule.get("start_time")) if schedule else None
+    stop_time = _valid_time(schedule.get("stop_time")) if schedule else None
+    days = _valid_days(schedule.get("days")) if schedule else None
+    for key, value in (("dimming", dimming), ("switch_pulse", switch_pulse), ("cover_disabled", cover_disabled), ("always_active", always_active), ("schedule.enabled", schedule_enabled), ("schedule.start_time", start_time), ("schedule.stop_time", stop_time), ("schedule.days", days)):
+        if value is None:
+            missing.append(key)
+    missing = sorted(set(missing))
+    return PoolLightingSettings(
+        always_active=always_active, cover_disabled=cover_disabled, schedule_enabled=schedule_enabled,
+        schedule_start_time=start_time, schedule_stop_time=stop_time, schedule_days=days or (),
+        dimming=str(config["dimming"]) if _is_present(config.get("dimming")) else None,
+        switch_pulse=str(config["switch_pulse"]) if _is_present(config.get("switch_pulse")) else None,
+        detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
 
 
-def _extract_devalue_filter_settings(text: str) -> PoolFilterSettings:
-    """Extract complete filter settings from Remix/devalue route data."""
-    try:
-        values = json.loads(text)
-    except (TypeError, json.JSONDecodeError):
-        return PoolFilterSettings()
-    if not isinstance(values, list):
-        return PoolFilterSettings()
+def _decode_filter_schedule(config: Any, prefix: str) -> tuple[PoolFilterSchedule | None, list[str]]:
+    required = {"pump_speed", "start_time", "stop_time", "enabled", "days"}
+    missing = [f"{prefix}.{key}" for key in _missing(config if isinstance(config, dict) else None, required)]
+    if not isinstance(config, dict):
+        return None, missing
+    enabled = _as_bool(config.get("enabled"))
+    pump_speed = config.get("pump_speed") if config.get("pump_speed") in PUMP_SPEED_OPTIONS else None
+    start_time = _valid_time(config.get("start_time"))
+    stop_time = _valid_time(config.get("stop_time"))
+    days = _valid_days(config.get("days"))
+    for key, value in (("enabled", enabled), ("pump_speed", pump_speed), ("start_time", start_time), ("stop_time", stop_time), ("days", days)):
+        if value is None:
+            missing.append(f"{prefix}.{key}")
+    if missing:
+        return None, sorted(set(missing))
+    return PoolFilterSchedule(enabled=enabled, pump_speed=pump_speed, start_time=start_time, stop_time=stop_time, days=days or ()), []
 
-    def resolve(value: Any) -> Any:
-        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(values):
-            return values[value]
-        return value
 
-    def decode_object(item: Any) -> dict[str, Any] | None:
-        if not isinstance(item, dict):
-            return None
-        decoded: dict[str, Any] = {}
-        for raw_key, raw_value in item.items():
-            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
-                key = resolve(int(raw_key[1:]))
-                if isinstance(key, str):
-                    decoded[key] = resolve(raw_value)
-            elif isinstance(raw_key, str):
-                decoded[raw_key] = resolve(raw_value)
-        return decoded
-
-    def decode_schedule(item: Any) -> PoolFilterSchedule | None:
-        decoded = decode_object(item)
-        if not decoded or not {"pump_speed", "start_time", "stop_time", "enabled", "days"}.issubset(decoded):
-            return None
-        enabled = _as_bool(decoded["enabled"])
-        pump_speed = decoded["pump_speed"]
-        start_time = decoded["start_time"]
-        stop_time = decoded["stop_time"]
-        raw_days = decoded["days"]
-        if (
-            enabled is None
-            or pump_speed not in PUMP_SPEED_OPTIONS
-            or not isinstance(start_time, str)
-            or not isinstance(stop_time, str)
-            or not isinstance(raw_days, list)
-        ):
-            return None
-        days = tuple(
-            str(resolve(day)).lower()
-            for day in raw_days
-            if isinstance(resolve(day), str)
-        )
-        if any(day not in DAYS for day in days):
-            return None
-        return PoolFilterSchedule(
-            enabled=enabled,
-            pump_speed=pump_speed,
-            start_time=start_time,
-            stop_time=stop_time,
-            days=days,
-        )
-
+def _extract_devalue_filter_settings(text: str, pool_id: str | None = None) -> PoolFilterSettings:
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "filter", pool_id=pool_id)
     required = {"always_active", "pump_speed", "schedule_1", "schedule_2", "schedule_3"}
-    for item in values:
-        decoded = decode_object(item)
-        if not decoded or not required.issubset(decoded):
-            continue
-        always_active = _as_bool(decoded["always_active"])
-        pump_speed = decoded["pump_speed"]
-        schedules = (
-            decode_schedule(decoded["schedule_1"]),
-            decode_schedule(decoded["schedule_2"]),
-            decode_schedule(decoded["schedule_3"]),
-        )
-        if always_active is None or pump_speed not in PUMP_SPEED_OPTIONS or any(schedule is None for schedule in schedules):
-            continue
-        return PoolFilterSettings(
-            always_active=always_active,
-            pump_speed=pump_speed,
-            schedule_1=schedules[0],
-            schedule_2=schedules[1],
-            schedule_3=schedules[2],
-            valid=True,
-        )
-    return PoolFilterSettings()
+    missing = list(_missing(config, required))
+    if config is None:
+        return PoolFilterSettings(detected=detected, missing_fields=tuple(missing))
+    always_active = _as_bool(config.get("always_active"))
+    pump_speed = config.get("pump_speed") if config.get("pump_speed") in PUMP_SPEED_OPTIONS else None
+    schedules: list[PoolFilterSchedule | None] = []
+    for key in ("schedule_1", "schedule_2", "schedule_3"):
+        schedule, schedule_missing = _decode_filter_schedule(config.get(key), key)
+        schedules.append(schedule)
+        missing.extend(schedule_missing)
+    if always_active is None:
+        missing.append("always_active")
+    if pump_speed is None:
+        missing.append("pump_speed")
+    missing = sorted(set(missing))
+    return PoolFilterSettings(
+        always_active=always_active, pump_speed=pump_speed,
+        schedule_1=schedules[0], schedule_2=schedules[1], schedule_3=schedules[2],
+        detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
 
-def _extract_devalue_cover_settings(text: str) -> PoolCoverSettings:
-    """Extract cover settings from Remix/devalue serialized route data.
 
-    The decoded GET values and the PUT payload use crossed pump fields compared
-    to the portal/Home Assistant labels:
-      - API pump_close = portal/HA Opening Pump.
-      - API pump_open  = portal/HA Closing Pump.
-    """
-    try:
-        values = json.loads(text)
-    except (TypeError, json.JSONDecodeError):
-        return PoolCoverSettings()
-    if not isinstance(values, list):
-        return PoolCoverSettings()
-
-    def resolve(value: Any) -> Any:
-        if isinstance(value, int) and 0 <= value < len(values):
-            return values[value]
-        return value
-
-    def decode_object(obj: Any) -> dict[str, Any] | None:
-        if not isinstance(obj, dict):
-            return None
-        decoded: dict[str, Any] = {}
-        for raw_key, raw_value in obj.items():
-            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
-                key = resolve(int(raw_key[1:]))
-                value = resolve(raw_value)
-                if isinstance(key, str):
-                    decoded[key] = value
-            elif isinstance(raw_key, str):
-                decoded[raw_key] = resolve(raw_value)
-        return decoded
-
-    def from_decoded(decoded: dict[str, Any]) -> PoolCoverSettings:
-        return PoolCoverSettings(
-            protection=_as_bool(decoded.get("protection")),
-            # API pump_close = portal/HA Opening Pump.
-            pump_open=_as_bool(decoded.get("pump_close")),
-            # API pump_open = portal/HA Closing Pump.
-            pump_close=_as_bool(decoded.get("pump_open")),
-            pump_low_speed=_as_bool(decoded.get("pump_low_speed")),
-            valid=all(_as_bool(decoded.get(key)) is not None for key in required),
-        )
-
+def _extract_devalue_cover_settings(text: str, pool_id: str | None = None) -> PoolCoverSettings:
+    """Extract cover settings; API pump fields are crossed with portal labels."""
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "cover", pool_id=pool_id)
     required = {"protection", "pump_open", "pump_close", "pump_low_speed"}
-    for item in values:
-        decoded = decode_object(item)
-        if decoded and required.issubset(decoded):
-            return from_decoded(decoded)
+    missing = list(_missing(config, required))
+    if config is None:
+        return PoolCoverSettings(detected=detected, missing_fields=tuple(missing))
+    protection = _as_bool(config.get("protection"))
+    api_pump_open = _as_bool(config.get("pump_open"))
+    api_pump_close = _as_bool(config.get("pump_close"))
+    pump_low_speed = _as_bool(config.get("pump_low_speed"))
+    for key, value in (("protection", protection), ("pump_open", api_pump_open), ("pump_close", api_pump_close), ("pump_low_speed", pump_low_speed)):
+        if value is None:
+            missing.append(key)
+    location = config.get("location") if isinstance(config.get("location"), dict) else {}
+    missing = sorted(set(missing))
+    return PoolCoverSettings(
+        protection=protection,
+        # API pump_close = portal/HA Opening Pump.
+        pump_open=api_pump_close,
+        # API pump_open = portal/HA Closing Pump.
+        pump_close=api_pump_open,
+        pump_low_speed=pump_low_speed,
+        longitude=str(location["longitude"]) if _is_present(location.get("longitude")) else None,
+        latitude=str(location["latitude"]) if _is_present(location.get("latitude")) else None,
+        detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
 
-    key_indexes: dict[str, int] = {}
-    for idx, value in enumerate(values):
-        if isinstance(value, str) and value in required:
-            key_indexes[value] = idx
 
-    if required.issubset(key_indexes):
-        needed_raw_keys = {f"_{idx}" for idx in key_indexes.values()}
-        for item in values:
-            if not isinstance(item, dict):
-                continue
-            if not needed_raw_keys.issubset(set(item.keys())):
-                continue
-            decoded = decode_object(item)
-            if decoded and required.issubset(decoded):
-                return from_decoded(decoded)
-    return PoolCoverSettings()
+def _extract_devalue_backwash_settings(text: str, pool_id: str | None = None) -> PoolBackwashSettings:
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "backwash", pool_id=pool_id)
+    required = {"interval", "rinse_duration", "backwash_duration", "pump_speed", "start_date", "start_time"}
+    missing = list(_missing(config, required))
+    if config is None:
+        return PoolBackwashSettings(detected=detected, missing_fields=tuple(missing))
+    interval = _as_float(config.get("interval"))
+    rinse_duration = _as_float(config.get("rinse_duration"))
+    backwash_duration = _as_float(config.get("backwash_duration"))
+    pump_speed = config.get("pump_speed") if config.get("pump_speed") in BACKWASH_PUMP_SPEED_OPTIONS else None
+    start_date = _normalize_smartpool_date(config.get("start_date") if isinstance(config.get("start_date"), str) else None)
+    start_time = _valid_time(config.get("start_time"))
+    for key, value in (("interval", interval), ("rinse_duration", rinse_duration), ("backwash_duration", backwash_duration), ("pump_speed", pump_speed), ("start_date", start_date), ("start_time", start_time)):
+        if value is None:
+            missing.append(key)
+    missing = sorted(set(missing))
+    return PoolBackwashSettings(
+        interval=interval, rinse_duration=rinse_duration, backwash_duration=backwash_duration,
+        pump_speed=pump_speed, start_date=start_date, start_time=start_time,
+        detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
 
 
+def _extract_devalue_eco_valve_settings(text: str, pool_id: str | None = None) -> PoolEcoValveSettings:
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "eco_valve", pool_id=pool_id)
+    required = {"regulation", "start_time", "stop_time"}
+    missing = list(_missing(config, required))
+    if config is None:
+        return PoolEcoValveSettings(detected=detected, missing_fields=tuple(missing) if detected else ())
+    regulation = config.get("regulation") if config.get("regulation") in ECO_VALVE_REGULATION_OPTIONS else None
+    start_time = _valid_time(config.get("start_time"))
+    stop_time = _valid_time(config.get("stop_time"))
+    for key, value in (("regulation", regulation), ("start_time", start_time), ("stop_time", stop_time)):
+        if value is None:
+            missing.append(key)
+    missing = sorted(set(missing))
+    return PoolEcoValveSettings(
+        regulation=regulation, start_time=start_time, stop_time=stop_time,
+        detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
 
-def _extract_devalue_eco_valve_settings(text: str) -> PoolEcoValveSettings:
-    """Extract Eco Valve settings from Remix/devalue serialized route data.
-
-    Example observed in SmartPoolConnect route data:
-        {_7089: 888, _1228: 7064, _1230: 7064}
-        7089 = "regulation", 888 = "off"
-        1228 = "start_time", 1230 = "stop_time", 7064 = "00:00"
-    """
-    try:
-        values = json.loads(text)
-    except (TypeError, json.JSONDecodeError):
-        return PoolEcoValveSettings()
-
-    if not isinstance(values, list):
-        return PoolEcoValveSettings()
-
-    def resolve(value: Any) -> Any:
-        if isinstance(value, int) and 0 <= value < len(values):
-            return values[value]
-        return value
-
-    def decode_object(obj: Any) -> dict[str, Any] | None:
-        if not isinstance(obj, dict):
-            return None
-        decoded: dict[str, Any] = {}
-        for raw_key, raw_value in obj.items():
-            if isinstance(raw_key, str) and raw_key.startswith("_") and raw_key[1:].isdigit():
-                key = resolve(int(raw_key[1:]))
-                value = resolve(raw_value)
-                if isinstance(key, str):
-                    decoded[key] = value
-            elif isinstance(raw_key, str):
-                decoded[raw_key] = resolve(raw_value)
-        return decoded
-
-    best: PoolEcoValveSettings | None = None
-
-    for item in values:
-        decoded = decode_object(item)
-        if not decoded:
-            continue
-
-        regulation = decoded.get("regulation")
-        start_time = decoded.get("start_time")
-        stop_time = decoded.get("stop_time")
-
-        valid_regulation = regulation if regulation in ECO_VALVE_REGULATION_OPTIONS else None
-        valid_start_time = start_time if isinstance(start_time, str) and re.match(r"^\d{2}:\d{2}$", start_time) else None
-        valid_stop_time = stop_time if isinstance(stop_time, str) and re.match(r"^\d{2}:\d{2}$", stop_time) else None
-
-        if valid_regulation is None and valid_start_time is None and valid_stop_time is None:
-            continue
-
-        candidate = PoolEcoValveSettings(
-            regulation=valid_regulation,
-            start_time=valid_start_time,
-            stop_time=valid_stop_time,
-            valid=(valid_regulation is not None and valid_start_time is not None and valid_stop_time is not None),
-        )
-
-        if candidate.regulation is not None and candidate.start_time is not None and candidate.stop_time is not None:
-            return candidate
-
-        if best is None:
-            best = candidate
-
-    return best or PoolEcoValveSettings()
 
 def _format_smartpool_date(value: str | None) -> str:
     if not value:
@@ -792,6 +699,7 @@ class SmartPoolConnectClient:
         self.oauth_base_url = oauth_base_url.rstrip("/")
         self._session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         self._pool_route_text: str | None = None
+        self._pool_route_decoded: Any | None = None
         self._pool_route_cached_at: float = 0.0
         self._settings_bundle: tuple[Any, ...] | None = None
         self._settings_bundle_cached_at: float = 0.0
@@ -1012,6 +920,7 @@ class SmartPoolConnectClient:
 
     def _invalidate_settings_cache(self) -> None:
         self._pool_route_text = None
+        self._pool_route_decoded = None
         self._pool_route_cached_at = 0.0
         self._settings_bundle = None
         self._settings_bundle_cached_at = 0.0
@@ -1022,8 +931,18 @@ class SmartPoolConnectClient:
             return self._pool_route_text
         text = await self._request_text_with_reauth("GET", f"/pool/{self.pool_id}.data")
         self._pool_route_text = text
+        self._pool_route_decoded = None
         self._pool_route_cached_at = now
         return text
+
+    async def _get_pool_route_decoded(self, *, force_refresh: bool = False) -> Any:
+        text = await self._get_pool_route_text(force_refresh=force_refresh)
+        if self._pool_route_decoded is None:
+            decoded = _decode_route_response(text)
+            if decoded is None:
+                raise SmartPoolConnectError("SmartPoolConnect returned malformed pool route data")
+            self._pool_route_decoded = decoded
+        return self._pool_route_decoded
 
     async def _get_current_from_pool_data(self) -> tuple[str | None, float | None, float | None]:
         try:
@@ -1035,7 +954,10 @@ class SmartPoolConnectClient:
 
     async def async_get_ph_settings(self, *, force_refresh: bool = False) -> PoolPhSettings:
         try:
-            return _extract_devalue_ph_settings(await self._get_pool_route_text(force_refresh=force_refresh))
+            return _extract_devalue_ph_settings(
+                await self._get_pool_route_decoded(force_refresh=force_refresh),
+                self.pool_id,
+            )
         except SmartPoolConnectError:
             _LOGGER.debug("Could not read pH settings from pool route data", exc_info=True)
             return PoolPhSettings()
@@ -1074,7 +996,10 @@ class SmartPoolConnectClient:
 
     async def async_get_rx_settings(self, *, force_refresh: bool = False) -> PoolRxSettings:
         try:
-            return _extract_devalue_rx_settings(await self._get_pool_route_text(force_refresh=force_refresh))
+            return _extract_devalue_rx_settings(
+                await self._get_pool_route_decoded(force_refresh=force_refresh),
+                self.pool_id,
+            )
         except SmartPoolConnectError:
             _LOGGER.debug("Could not read Rx settings from pool route data", exc_info=True)
             return PoolRxSettings()
@@ -1110,7 +1035,10 @@ class SmartPoolConnectClient:
 
     async def async_get_lighting_settings(self, *, force_refresh: bool = False) -> PoolLightingSettings:
         try:
-            return _extract_devalue_lighting_settings(await self._get_pool_route_text(force_refresh=force_refresh))
+            return _extract_devalue_lighting_settings(
+                await self._get_pool_route_decoded(force_refresh=force_refresh),
+                self.pool_id,
+            )
         except SmartPoolConnectError:
             _LOGGER.debug("Could not read lighting settings from pool route data", exc_info=True)
             return PoolLightingSettings()
@@ -1148,17 +1076,34 @@ class SmartPoolConnectClient:
         )
         self._invalidate_settings_cache()
 
-    async def async_get_filter_settings(self) -> PoolFilterSettings:
-        text = await self._request_text_with_reauth(
-            "GET",
-            f"/pool/{self.pool_id}/filter.data?_routes=root%2Cpool%2Froutes%2F%24pid.filter",
-        )
-        return _extract_devalue_filter_settings(text)
+    async def async_get_filter_settings(self, *, force_refresh: bool = False) -> PoolFilterSettings:
+        try:
+            return _extract_devalue_filter_settings(
+                await self._get_pool_route_decoded(force_refresh=force_refresh),
+                self.pool_id,
+            )
+        except SmartPoolConnectError:
+            _LOGGER.debug("Could not read filter settings from pool route data", exc_info=True)
+            return PoolFilterSettings()
 
     async def async_set_filter_settings(self, settings: PoolFilterSettings) -> None:
-        if not settings.valid or not all((settings.schedule_1, settings.schedule_2, settings.schedule_3)):
+        schedules = (settings.schedule_1, settings.schedule_2, settings.schedule_3)
+        if (
+            not settings.valid
+            or settings.pump_speed not in PUMP_SPEED_OPTIONS
+            or not all(schedules)
+            or any(
+                schedule.pump_speed not in PUMP_SPEED_OPTIONS
+                or schedule.enabled is None
+                or schedule.start_time is None
+                or schedule.stop_time is None
+                for schedule in schedules
+                if schedule is not None
+            )
+        ):
             raise SmartPoolConnectError("Filter settings update aborted because the current controller settings could not be read completely")
         s1, s2, s3 = settings.schedule_1, settings.schedule_2, settings.schedule_3
+        assert s1 is not None and s2 is not None and s3 is not None
         await self._request_json("PUT", f"/pool/{self.pool_id}/filter.data", data={
             "always_active": "true" if settings.always_active else "false",
             "pump_speed": settings.pump_speed,
@@ -1169,32 +1114,17 @@ class SmartPoolConnectClient:
         self._invalidate_settings_cache()
 
     async def async_get_backwash_settings(self) -> PoolBackwashSettings:
-        text: str | None = None
-        last_error: SmartPoolConnectError | None = None
-        for path in (f"/pool/{self.pool_id}/filter/backwash", f"/pool/{self.pool_id}/filter/backwash.data"):
-            try:
-                text = await self._request_text_with_reauth("GET", path)
-                break
-            except (AuthenticationError, TransientServerError):
-                raise
-            except SmartPoolConnectError as err:
-                last_error = err
-        if text is None:
-            if last_error is not None:
-                raise last_error
+        try:
+            return _extract_devalue_backwash_settings(
+                await self._get_pool_route_decoded(),
+                self.pool_id,
+            )
+        except SmartPoolConnectError:
+            _LOGGER.debug("Could not read backwash settings from pool route data", exc_info=True)
             return PoolBackwashSettings()
-        interval = _extract_input_value(text, "interval") or _extract_remix_scalar(text, "interval")
-        rinse_duration = _extract_input_value(text, "rinse_duration") or _extract_remix_scalar(text, "rinse_duration")
-        backwash_duration = _extract_input_value(text, "backwash_duration") or _extract_remix_scalar(text, "backwash_duration")
-        pump_speed = _extract_select_value(text, "pump_speed") or _extract_input_value(text, "pump_speed") or _extract_remix_scalar(text, "pump_speed")
-        start_date = _extract_input_value(text, "start_date") or _extract_remix_scalar(text, "start_date")
-        start_time = _extract_input_value(text, "start_time") or _extract_remix_scalar(text, "start_time")
-        settings = PoolBackwashSettings(interval=_as_float(interval), rinse_duration=_as_float(rinse_duration), backwash_duration=_as_float(backwash_duration), pump_speed=pump_speed if pump_speed in BACKWASH_PUMP_SPEED_OPTIONS else None, start_date=_normalize_smartpool_date(start_date), start_time=start_time)
-        settings.valid = all(value is not None for value in (settings.interval, settings.rinse_duration, settings.backwash_duration, settings.pump_speed, settings.start_date, settings.start_time))
-        return settings
 
     async def async_set_backwash_settings(self, settings: PoolBackwashSettings) -> None:
-        if not settings.valid or any(value is None for value in (settings.interval, settings.rinse_duration, settings.backwash_duration, settings.pump_speed, settings.start_date, settings.start_time)):
+        if not settings.valid or settings.pump_speed not in BACKWASH_PUMP_SPEED_OPTIONS or any(value is None for value in (settings.interval, settings.rinse_duration, settings.backwash_duration, settings.pump_speed, settings.start_date, settings.start_time)):
             raise SmartPoolConnectError("Backwash settings update aborted because the current controller settings could not be read completely")
         await self._request_json("PUT", f"/pool/{self.pool_id}/filter/backwash.data", data={"interval": str(int(settings.interval)), "rinse_duration": str(int(settings.rinse_duration)), "backwash_duration": str(int(settings.backwash_duration)), "pump_speed": settings.pump_speed, "start_date": _format_smartpool_date(settings.start_date), "start_time": settings.start_time}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
         self._invalidate_settings_cache()
@@ -1204,30 +1134,14 @@ class SmartPoolConnectClient:
         self._invalidate_settings_cache()
 
     async def async_get_eco_valve_settings(self) -> PoolEcoValveSettings:
-        last_error: SmartPoolConnectError | None = None
-        for path in (f"/pool/{self.pool_id}/filter/eco-valve.data", f"/pool/{self.pool_id}/filter/eco-valve", f"/pool/{self.pool_id}/filter.data", f"/pool/{self.pool_id}.data", f"/pool/{self.pool_id}", "/pool.data"):
-            try:
-                text = await self._request_text_with_reauth("GET", path)
-            except (AuthenticationError, TransientServerError):
-                raise
-            except SmartPoolConnectError as err:
-                last_error = err
-                continue
-            if not text:
-                continue
-            settings = _extract_devalue_eco_valve_settings(text)
-            if settings.valid:
-                return settings
-            regulation = _extract_select_value(text, "regulation") or _extract_input_value(text, "regulation") or _extract_remix_scalar(text, "regulation")
-            start_time = _extract_input_value(text, "start_time") or _extract_remix_scalar(text, "start_time")
-            stop_time = _extract_input_value(text, "stop_time") or _extract_remix_scalar(text, "stop_time")
-            settings = PoolEcoValveSettings(regulation=regulation if regulation in ECO_VALVE_REGULATION_OPTIONS else None, start_time=start_time, stop_time=stop_time)
-            settings.valid = settings.regulation is not None and settings.start_time is not None and settings.stop_time is not None
-            if settings.valid:
-                return settings
-        if last_error is not None:
-            raise last_error
-        return PoolEcoValveSettings()
+        try:
+            return _extract_devalue_eco_valve_settings(
+                await self._get_pool_route_decoded(),
+                self.pool_id,
+            )
+        except SmartPoolConnectError:
+            _LOGGER.debug("Could not read Eco Valve settings from pool route data", exc_info=True)
+            return PoolEcoValveSettings()
 
     async def async_set_eco_valve_settings(self, settings: PoolEcoValveSettings) -> None:
         if not settings.valid or settings.regulation not in ECO_VALVE_REGULATION_OPTIONS or settings.start_time is None or settings.stop_time is None:
@@ -1236,36 +1150,14 @@ class SmartPoolConnectClient:
         self._invalidate_settings_cache()
 
     async def async_get_cover_settings(self) -> PoolCoverSettings:
-        last_error: SmartPoolConnectError | None = None
-        for path in (f"/pool/{self.pool_id}/cover.data?_routes=root%2Cpool%2Froutes%2F%24pid.cover", f"/pool/{self.pool_id}/cover.data", f"/pool/{self.pool_id}/cover", f"/pool/{self.pool_id}.data", f"/pool/{self.pool_id}", "/pool.data"):
-            try:
-                text = await self._request_text_with_reauth("GET", path)
-            except (AuthenticationError, TransientServerError):
-                raise
-            except SmartPoolConnectError as err:
-                last_error = err
-                continue
-            if not text:
-                continue
-            settings = _extract_devalue_cover_settings(text)
-            if settings.valid:
-                settings.longitude = _extract_input_value(text, "location.longitude") or _extract_remix_scalar(text, "location.longitude") or _extract_remix_scalar(text, "longitude")
-                settings.latitude = _extract_input_value(text, "location.latitude") or _extract_remix_scalar(text, "location.latitude") or _extract_remix_scalar(text, "latitude")
-                return settings
-            settings = PoolCoverSettings(
-                protection=_extract_any_bool(text, "protection", "cover_protection"),
-                pump_open=_extract_any_bool(text, "pump_close", "opening_pump"),
-                pump_close=_extract_any_bool(text, "pump_open", "closing_pump"),
-                pump_low_speed=_extract_any_bool(text, "pump_low_speed", "opening_pump_slow"),
-                longitude=_extract_input_value(text, "location.longitude") or _extract_remix_scalar(text, "location.longitude") or _extract_remix_scalar(text, "longitude"),
-                latitude=_extract_input_value(text, "location.latitude") or _extract_remix_scalar(text, "location.latitude") or _extract_remix_scalar(text, "latitude"),
+        try:
+            return _extract_devalue_cover_settings(
+                await self._get_pool_route_decoded(),
+                self.pool_id,
             )
-            settings.valid = all(value is not None for value in (settings.protection, settings.pump_open, settings.pump_close, settings.pump_low_speed))
-            if settings.valid:
-                return settings
-        if last_error is not None:
-            raise last_error
-        return PoolCoverSettings()
+        except SmartPoolConnectError:
+            _LOGGER.debug("Could not read cover settings from pool route data", exc_info=True)
+            return PoolCoverSettings()
 
     async def async_set_cover_settings(self, settings: PoolCoverSettings) -> None:
         if not settings.valid or any(value is None for value in (settings.protection, settings.pump_open, settings.pump_close, settings.pump_low_speed)):
@@ -1307,6 +1199,19 @@ class SmartPoolConnectClient:
             pool = {}
         pool_name, ph, rx = await self._get_current_from_pool_data()
         (ph_settings, rx_settings, lighting_settings, filter_settings, backwash_settings, eco_valve_settings, cover_settings) = await self._get_settings_bundle()
+        capabilities = frozenset(
+            name
+            for name, settings in (
+                ("ph", ph_settings),
+                ("rx", rx_settings),
+                ("lighting", lighting_settings),
+                ("filter", filter_settings),
+                ("backwash", backwash_settings),
+                ("eco_valve", eco_valve_settings),
+                ("cover", cover_settings),
+            )
+            if settings.detected
+        )
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
         fs3 = filter_settings.schedule_3 or PoolFilterSchedule()
@@ -1326,18 +1231,20 @@ class SmartPoolConnectClient:
             rx=rx, rx_target=rx_settings.target if rx_settings.target is not None else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"})), rx_dosing_time=rx_settings.dosing_time, rx_pausing_time=rx_settings.pausing_time,
             lighting_on=lighting_settings.always_active if lighting_settings.always_active is not None else (lighting not in (None, -1, 0)), lighting_always_active=lighting_settings.always_active, lighting_cover_disabled=lighting_settings.cover_disabled, lighting_schedule_enabled=lighting_settings.schedule_enabled, lighting_schedule_start_time=lighting_settings.schedule_start_time, lighting_schedule_stop_time=lighting_settings.schedule_stop_time, lighting_schedule_days=lighting_settings.schedule_days,
             filter_always_active=filter_settings.always_active, filter_pump_speed=filter_settings.pump_speed or live_pump_speed,
-            filter_schedule_1_enabled=fs1.enabled, filter_schedule_1_pump_speed=fs1.pump_speed or "low", filter_schedule_1_start_time=fs1.start_time, filter_schedule_1_stop_time=fs1.stop_time, filter_schedule_1_days=fs1.days,
-            filter_schedule_2_enabled=fs2.enabled, filter_schedule_2_pump_speed=fs2.pump_speed or "high", filter_schedule_2_start_time=fs2.start_time, filter_schedule_2_stop_time=fs2.stop_time, filter_schedule_2_days=fs2.days,
-            filter_schedule_3_enabled=fs3.enabled, filter_schedule_3_pump_speed=fs3.pump_speed or "low", filter_schedule_3_start_time=fs3.start_time, filter_schedule_3_stop_time=fs3.stop_time, filter_schedule_3_days=fs3.days,
+            filter_schedule_1_enabled=fs1.enabled, filter_schedule_1_pump_speed=fs1.pump_speed, filter_schedule_1_start_time=fs1.start_time, filter_schedule_1_stop_time=fs1.stop_time, filter_schedule_1_days=fs1.days,
+            filter_schedule_2_enabled=fs2.enabled, filter_schedule_2_pump_speed=fs2.pump_speed, filter_schedule_2_start_time=fs2.start_time, filter_schedule_2_stop_time=fs2.stop_time, filter_schedule_2_days=fs2.days,
+            filter_schedule_3_enabled=fs3.enabled, filter_schedule_3_pump_speed=fs3.pump_speed, filter_schedule_3_start_time=fs3.start_time, filter_schedule_3_stop_time=fs3.stop_time, filter_schedule_3_days=fs3.days,
             backwash_interval=backwash_settings.interval, backwash_rinse_duration=backwash_settings.rinse_duration, backwash_duration=backwash_settings.backwash_duration, backwash_pump_speed=backwash_settings.pump_speed, backwash_start_date=backwash_settings.start_date, backwash_start_time=backwash_settings.start_time,
             eco_valve_regulation=eco_valve_settings.regulation, eco_valve_start_time=eco_valve_settings.start_time, eco_valve_stop_time=eco_valve_settings.stop_time,
-            water_temperature=water_temperature, water_temperature_target=_as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=_cover_state(cover), cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
+            water_temperature=water_temperature, water_temperature_target=_as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=_cover_state(cover), cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, capabilities=capabilities, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
 
     async def async_set_lighting(self, on: bool) -> None:
         await self.async_set_lighting_settings(always_active=on)
 
     async def async_set_pump_speed(self, speed: str) -> None:
-        filter_settings = await self.async_get_filter_settings()
+        if speed not in PUMP_SPEED_OPTIONS:
+            raise SmartPoolConnectError(f"Unsupported filter pump speed: {speed}")
+        filter_settings = await self.async_get_filter_settings(force_refresh=True)
         filter_settings.pump_speed = speed
         await self.async_set_filter_settings(filter_settings)
 
