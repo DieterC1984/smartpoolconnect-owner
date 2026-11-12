@@ -1,3 +1,12 @@
+## ❤️ Support the project
+
+If SmartPoolConnect Owner is useful to you and you'd like to support its continued development, you can sponsor the project through GitHub Sponsors.
+
+Sponsorship is completely optional and does not affect access to features or support.
+
+[❤️ Sponsor this project](https://github.com/sponsors/DieterC1984)
+
+
 # SmartPoolConnect Owner
 
 Unofficial Home Assistant integration for SmartPoolConnect owner portals.
