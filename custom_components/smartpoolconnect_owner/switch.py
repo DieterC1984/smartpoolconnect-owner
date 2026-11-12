@@ -193,6 +193,13 @@ SWITCHES: list[SmartPoolSwitchDescription] = [
     SmartPoolSwitchDescription(key="temperature_frost_protection", translation_key="temperature_frost_protection", icon="mdi:snowflake-alert", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.temperature_frost_protection, set_fn=_set_temperature_frost_protection),
     SmartPoolSwitchDescription(key="temperature_schedule_enabled", translation_key="temperature_schedule_enabled", icon="mdi:calendar-clock", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.temperature_schedule_enabled, set_fn=_set_temperature_schedule_enabled),
 ]
+
+COVER_SETTING_KEYS = {
+    "cover_protection",
+    "opening_pump",
+    "closing_pump",
+    "opening_pump_slow",
+}
 for day in DAYS:
     SWITCHES.append(SmartPoolSwitchDescription(key=f"lighting_schedule_{day}", translation_key=f"lighting_schedule_{day}", icon="mdi:calendar", value_fn=lambda s, d=day: d in s.lighting_schedule_days, set_fn=_set_lighting_day(day)))
     SWITCHES.append(SmartPoolSwitchDescription(key=f"temperature_schedule_{day}", translation_key=f"temperature_schedule_{day}", icon="mdi:calendar", value_fn=lambda s, d=day: d in s.temperature_schedule_days, set_fn=_set_temperature_schedule_day(day)))
@@ -241,6 +248,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
         for description in SWITCHES
         if (
             (description.key != "zero_e_enabled" or "zero_e" in capabilities)
+            and (
+                description.key not in COVER_SETTING_KEYS
+                or "cover" in capabilities
+            )
             and (
                 not description.key.startswith("temperature_")
                 or "temperature" in capabilities

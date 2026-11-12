@@ -1,5 +1,4 @@
 """Cover platform for SmartPoolConnect pool cover/deck."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -21,19 +20,22 @@ async def async_setup_entry(
     entry: SmartPoolConnectConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Set up control only for a validated, write-capable cover."""
+
+    status = entry.runtime_data.data
+    if status is None or "cover" not in status.capabilities:
+        return
     async_add_entities([PoolCover(entry.runtime_data)])
 
 
 class PoolCover(SmartPoolConnectEntity, CoverEntity):
     _attr_translation_key = "cover"
     _attr_device_class = CoverDeviceClass.SHADE
-
     _attr_supported_features = (
         CoverEntityFeature.OPEN
         | CoverEntityFeature.CLOSE
         | CoverEntityFeature.STOP
     )
-
     _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator):
@@ -43,16 +45,12 @@ class PoolCover(SmartPoolConnectEntity, CoverEntity):
     @property
     def is_closed(self) -> bool | None:
         state = self.coordinator.data.cover_state
-
         if state in ("opening", "closing"):
             return None
-
         if state == "closed":
             return True
-
         if state == "open":
             return False
-
         return None
 
     @property

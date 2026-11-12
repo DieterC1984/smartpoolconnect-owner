@@ -145,6 +145,16 @@ class PoolStatus:
     cover_pump_open: bool | None = None
     cover_pump_close: bool | None = None
     cover_pump_low_speed: bool | None = None
+    covco_cover_position: float | None = None
+    phnix_setpoint: float | None = None
+    phnix_inlet_temperature: float | None = None
+    phnix_outlet_temperature: float | None = None
+    phnix_coil_temperature: float | None = None
+    phnix_ambient_temperature: float | None = None
+    phnix_mode: int | None = None
+    phnix_sub_mode: int | None = None
+    phnix_error: int | None = None
+    phnix_fail_0: int | None = None
     capabilities: frozenset[str] = frozenset()
     raw_live_status: dict[str, Any] | None = None
     raw_pool_status: dict[str, Any] | None = None
@@ -292,6 +302,15 @@ def _as_finite_float(value: Any) -> float | None:
     return converted if converted is not None and math.isfinite(converted) else None
 
 
+def _as_int(value: Any) -> int | None:
+    """Return an integer value without accepting booleans or fractions."""
+
+    converted = _as_finite_float(value)
+    if converted is None or not converted.is_integer():
+        return None
+    return int(converted)
+
+
 def _as_bool(value: Any) -> bool | None:
     if value is None:
         return None
@@ -337,6 +356,99 @@ def _pump_speed(value: Any) -> str | None:
 
 def _cover_state(value: Any) -> str | None:
     return {1: "open", 2: "closed", 3: "opening", 4: "closing", "open": "open", "closed": "closed", "opening": "opening", "closing": "closing"}.get(value)
+
+
+def _find_data_block(obj: Any, name: str) -> dict[str, Any] | None:
+    """Find one named controller block without confusing it with a column."""
+
+    if isinstance(obj, dict):
+        direct = obj.get(name)
+        if isinstance(direct, dict):
+            return direct
+        for value in obj.values():
+            found = _find_data_block(value, name)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = _find_data_block(value, name)
+            if found is not None:
+                return found
+    return None
+
+
+def _column_values(block: dict[str, Any] | None) -> dict[str, Any]:
+    """Convert a SmartPool ``columns`` block to a simple name/value mapping."""
+
+    if not isinstance(block, dict) or not isinstance(block.get("columns"), list):
+        return {}
+    values: dict[str, Any] = {}
+    for column in block["columns"]:
+        if not isinstance(column, dict) or not isinstance(column.get("name"), str):
+            continue
+        values[column["name"]] = column.get("value")
+    return values
+
+
+def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
+    """Return validated Covco presence, position percentage, and endpoint state.
+
+    Position is derived only from the encoder endpoints supplied by the
+    controller.  Intermediate ``position_state`` values are intentionally not
+    interpreted until captures for all states are available.
+    """
+
+    values = _column_values(_find_data_block(data, "covco_data"))
+    open_location = _as_finite_float(values.get("open_location"))
+    close_location = _as_finite_float(values.get("close_location"))
+    current_location = _as_finite_float(values.get("current_location"))
+    hysteresis = _as_finite_float(values.get("hys_location"))
+    if (
+        open_location is None
+        or close_location is None
+        or current_location is None
+        or hysteresis is None
+        or hysteresis < 0
+        or math.isclose(open_location, close_location)
+    ):
+        return False, None, None
+
+    span = open_location - close_location
+    position = max(0.0, min(100.0, (current_location - close_location) / span * 100.0))
+    tolerance = min(hysteresis, abs(span) / 2)
+    state = None
+    if abs(current_location - open_location) <= tolerance:
+        state = "open"
+    elif abs(current_location - close_location) <= tolerance:
+        state = "closed"
+    return True, round(position, 1), state
+
+
+def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
+    """Return PHNIX telemetry only when the block contains real measurements."""
+
+    values = _column_values(_find_data_block(data, "temperature_phnx_data"))
+    telemetry: dict[str, float | int | None] = {
+        "setpoint": _as_finite_float(values.get("sp")),
+        "inlet": _as_finite_float(values.get("inlet")),
+        "outlet": _as_finite_float(values.get("outlet")),
+        "coil": _as_finite_float(values.get("coil")),
+        "ambient": _as_finite_float(values.get("ambient")),
+        "mode": _as_int(values.get("mode")),
+        "sub_mode": _as_int(values.get("sub_mode")),
+        "error": _as_int(values.get("err")),
+        "fail_0": _as_int(values.get("fail_0")),
+    }
+    temperatures = tuple(
+        telemetry[key] for key in ("setpoint", "inlet", "outlet", "coil", "ambient")
+    )
+    valid = (
+        telemetry["setpoint"] is not None
+        and telemetry["inlet"] is not None
+        and telemetry["outlet"] is not None
+        and any(value not in (None, 0, 0.0) for value in temperatures)
+    )
+    return valid, telemetry if valid else {}
 
 
 def _decode_route_response(text: Any) -> Any | None:
@@ -958,6 +1070,7 @@ class SmartPoolConnectClient:
         self._pool_route_cached_at: float = 0.0
         self._settings_bundle: tuple[Any, ...] | None = None
         self._settings_bundle_cached_at: float = 0.0
+        self._last_capabilities: frozenset[str] = frozenset()
 
     async def close(self) -> None:
         await self._session.close()
@@ -1692,7 +1805,7 @@ class SmartPoolConnectClient:
             temperature_settings,
             cover_settings,
         ) = await self._get_settings_bundle()
-        capabilities = frozenset(
+        capabilities = {
             name
             for name, settings in (
                 ("ph", ph_settings),
@@ -1701,11 +1814,20 @@ class SmartPoolConnectClient:
                 ("filter", filter_settings),
                 ("backwash", backwash_settings),
                 ("eco_valve", eco_valve_settings),
+            )
+            if settings.detected
+        }
+        # Settings entities can write to physical equipment.  Expose those
+        # capabilities only after the complete, validated portal contract was
+        # read; block presence alone is not sufficient.
+        capabilities.update(
+            name
+            for name, settings in (
                 ("zero_e", zero_e_settings),
                 ("temperature", temperature_settings),
                 ("cover", cover_settings),
             )
-            if settings.detected
+            if settings.valid
         )
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
@@ -1719,6 +1841,17 @@ class SmartPoolConnectClient:
         cover = _find_key(live, {"cover"})
         pump_status = _find_key(live, {"pump_status"})
         pump_speed = _find_key(live, {"pump_speed"})
+        standard_cover_state = _cover_state(cover)
+        covco_valid, covco_position, covco_state = _covco_telemetry(live)
+        phnix_valid, phnix = _phnix_telemetry(live)
+        if standard_cover_state is not None:
+            capabilities.add("cover_status")
+        if covco_valid:
+            capabilities.add("covco_cover")
+        if phnix_valid:
+            capabilities.add("phnix_heat_pump")
+        frozen_capabilities = frozenset(capabilities)
+        self._last_capabilities = frozen_capabilities
         water_temperature = _as_float(_find_key(live, {"water_temp", "water_temperature", "temperature"}))
         if water_temperature is None:
             water_temperature = _as_float(_find_key(pool, {"water_temp", "water_temperature", "temperature"}))
@@ -1736,7 +1869,7 @@ class SmartPoolConnectClient:
             eco_valve_regulation=eco_valve_settings.regulation, eco_valve_start_time=eco_valve_settings.start_time, eco_valve_stop_time=eco_valve_settings.stop_time,
             zero_e_enabled=zero_e_settings.enabled, zero_e_enable_threshold=zero_e_settings.threshold_enable, zero_e_disable_threshold=zero_e_settings.threshold_disable, zero_e_target_temperature=zero_e_settings.threshold_temperature, zero_e_valid=zero_e_settings.valid,
             temperature_target=temperature_settings.target, temperature_interval=temperature_settings.interval, temperature_priority=temperature_settings.priority, temperature_pump_speed=temperature_settings.pump_speed, temperature_cooling_period=temperature_settings.cooling_period, temperature_offset_water=temperature_settings.offset_water, temperature_offset_ambient=temperature_settings.offset_ambient, temperature_frost_protection=temperature_settings.frost_protection, temperature_schedule_start_time=temperature_schedule.start_time, temperature_schedule_stop_time=temperature_schedule.stop_time, temperature_schedule_enabled=temperature_schedule.enabled, temperature_schedule_days=temperature_schedule.days, temperature_valid=temperature_settings.valid,
-            water_temperature=water_temperature, water_temperature_target=temperature_settings.target if temperature_settings.target is not None else _as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=_cover_state(cover), cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, capabilities=capabilities, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
+            water_temperature=water_temperature, water_temperature_target=temperature_settings.target if temperature_settings.target is not None else _as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=standard_cover_state or covco_state, cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, covco_cover_position=covco_position, phnix_setpoint=phnix.get("setpoint"), phnix_inlet_temperature=phnix.get("inlet"), phnix_outlet_temperature=phnix.get("outlet"), phnix_coil_temperature=phnix.get("coil"), phnix_ambient_temperature=phnix.get("ambient"), phnix_mode=phnix.get("mode"), phnix_sub_mode=phnix.get("sub_mode"), phnix_error=phnix.get("error"), phnix_fail_0=phnix.get("fail_0"), capabilities=frozen_capabilities, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
 
     async def async_set_lighting(self, on: bool) -> None:
         await self.async_set_lighting_settings(always_active=on)
@@ -1749,10 +1882,22 @@ class SmartPoolConnectClient:
         await self.async_set_filter_settings(filter_settings)
 
     async def async_cover_open(self) -> None:
+        if "cover" not in self._last_capabilities:
+            raise SmartPoolConnectError(
+                "Cover control is unavailable because no validated control contract was detected"
+            )
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_open", headers={"Content-Type": "application/json"})
 
     async def async_cover_close(self) -> None:
+        if "cover" not in self._last_capabilities:
+            raise SmartPoolConnectError(
+                "Cover control is unavailable because no validated control contract was detected"
+            )
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_close", headers={"Content-Type": "application/json"})
 
     async def async_cover_stop(self) -> None:
+        if "cover" not in self._last_capabilities:
+            raise SmartPoolConnectError(
+                "Cover control is unavailable because no validated control contract was detected"
+            )
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_stop", headers={"Content-Type": "application/json"})
