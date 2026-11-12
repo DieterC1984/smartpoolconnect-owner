@@ -1,10 +1,11 @@
-## ❤️ Support the project
+## ❤️ Support
 
-If SmartPoolConnect Owner is useful to you and you'd like to support its continued development, you can sponsor the project through GitHub Sponsors.
+If you find SmartPoolConnect Owner useful and would like to support its development, you can do so through GitHub Sponsors or PayPal.
 
-Sponsorship is completely optional and does not affect access to features or support.
+Support is completely optional. The integration and all its features remain free and open source.
 
-[❤️ Sponsor this project](https://github.com/sponsors/DieterC1984)
+[❤️ Sponsor on GitHub](https://github.com/sponsors/DieterC1984)  
+[☕ Support via PayPal](https://www.paypal.com/paypalme/@DieterCeuppens)
 
 
 # SmartPoolConnect Owner
