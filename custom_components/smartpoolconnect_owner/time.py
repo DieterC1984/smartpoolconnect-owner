@@ -1,177 +1,266 @@
-"""Time entities."""
+"""Time entities for SmartPoolConnect Owner."""
 from __future__ import annotations
-import time as monotonic_time
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import time
 from typing import Any
+
 from homeassistant.components.time import TimeEntity, TimeEntityDescription
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
 from . import SmartPoolConnectConfigEntry
-from .api import PoolBackwashSettings, PoolEcoValveSettings, PoolFilterSchedule, PoolFilterSettings, PoolLightingSettings, PoolStatus
+from .api import PoolStatus
 from .entity import SmartPoolConnectEntity
-PENDING_TIMEOUT_SECONDS = 45
+
 
 @dataclass(frozen=True, kw_only=True)
 class SmartPoolTimeDescription(TimeEntityDescription):
+    """Describe a SmartPool time entity."""
+
     value_fn: Callable[[PoolStatus], str | None]
     set_fn: Callable[["SmartPoolTime", str], Any]
 
-def _parse(v):
-    if not v:
-        return None
-    try:
-        h, m = v.split(":")[:2]
-        return time(int(h), int(m))
-    except (TypeError, ValueError):
-        return None
 
-def _fmt(v: time): return f"{v.hour:02d}:{v.minute:02d}"
+def _format_time(value: time) -> str:
+    return value.strftime("%H:%M")
 
-def _store(coordinator) -> dict[str, Any]:
-    if not hasattr(coordinator, "_smartpool_pending_config"):
-        coordinator._smartpool_pending_config = {}
-    store = coordinator._smartpool_pending_config
-    now = monotonic_time.monotonic()
-    for key in list(store):
-        if store[key].get("expires", 0) < now:
-            del store[key]
-    return store
 
-def _save_pending(coordinator, key: str, value: Any) -> None:
-    _store(coordinator)[key] = {"value": value, "expires": monotonic_time.monotonic() + PENDING_TIMEOUT_SECONDS}
+async def _set_lighting_start(entity, value: str) -> None:
+    await entity.coordinator.client.async_set_lighting_settings(
+        schedule_start_time=value
+    )
 
-def _lighting_from_data(d: PoolStatus) -> PoolLightingSettings:
-    return PoolLightingSettings(always_active=d.lighting_always_active if d.lighting_always_active is not None else bool(d.lighting_on), cover_disabled=d.lighting_cover_disabled if d.lighting_cover_disabled is not None else False, schedule_enabled=d.lighting_schedule_enabled if d.lighting_schedule_enabled is not None else False, schedule_start_time=d.lighting_schedule_start_time or "20:00", schedule_stop_time=d.lighting_schedule_stop_time or "23:59", schedule_days=d.lighting_schedule_days)
 
-def _lighting(coordinator) -> PoolLightingSettings:
-    pending = _store(coordinator).get("lighting")
-    if pending:
-        return pending["value"]
-    return _lighting_from_data(coordinator.data)
+async def _set_lighting_stop(entity, value: str) -> None:
+    await entity.coordinator.client.async_set_lighting_settings(
+        schedule_stop_time=value
+    )
 
-async def _commit_lighting(e, settings: PoolLightingSettings) -> None:
-    _save_pending(e.coordinator, "lighting", settings)
-    await e.coordinator.client.async_set_lighting_settings(always_active=bool(settings.always_active), cover_disabled=bool(settings.cover_disabled), schedule_enabled=bool(settings.schedule_enabled), schedule_start_time=settings.schedule_start_time or "20:00", schedule_stop_time=settings.schedule_stop_time or "23:59", schedule_days=settings.schedule_days)
 
-def _schedule(d: PoolStatus, idx: int) -> PoolFilterSchedule:
-    return PoolFilterSchedule(enabled=getattr(d, f"filter_schedule_{idx}_enabled"), pump_speed=getattr(d, f"filter_schedule_{idx}_pump_speed"), start_time=getattr(d, f"filter_schedule_{idx}_start_time"), stop_time=getattr(d, f"filter_schedule_{idx}_stop_time"), days=getattr(d, f"filter_schedule_{idx}_days"))
+def _set_filter_schedule_time(index: int, attribute: str):
+    async def setter(entity, value: str) -> None:
+        settings = await entity.coordinator.client.async_get_filter_settings(
+            force_refresh=True
+        )
+        schedule = getattr(settings, f"schedule_{index}")
+        if schedule is None:
+            raise RuntimeError("Filter settings could not be read before update")
+        setattr(schedule, attribute, value)
+        await entity.coordinator.client.async_set_filter_settings(settings)
 
-def _filter_from_data(d: PoolStatus) -> PoolFilterSettings:
-    return PoolFilterSettings(always_active=d.filter_always_active if d.filter_always_active is not None else False, pump_speed=d.filter_pump_speed or d.pump_speed or "medium", schedule_1=_schedule(d, 1), schedule_2=_schedule(d, 2), schedule_3=_schedule(d, 3))
-
-def _filter(coordinator) -> PoolFilterSettings:
-    pending = _store(coordinator).get("filter")
-    if pending:
-        return pending["value"]
-    return _filter_from_data(coordinator.data)
-
-async def _commit_filter(e, settings: PoolFilterSettings) -> None:
-    _save_pending(e.coordinator, "filter", settings)
-    await e.coordinator.client.async_set_filter_settings(settings)
-
-def _backwash_from_data(d: PoolStatus) -> PoolBackwashSettings:
-    return PoolBackwashSettings(interval=d.backwash_interval, rinse_duration=d.backwash_rinse_duration, backwash_duration=d.backwash_duration, pump_speed=d.backwash_pump_speed, start_date=d.backwash_start_date, start_time=d.backwash_start_time)
-
-def _backwash(coordinator) -> PoolBackwashSettings:
-    pending = _store(coordinator).get("backwash")
-    if pending:
-        return pending["value"]
-    return _backwash_from_data(coordinator.data)
-
-async def _commit_backwash(e, settings: PoolBackwashSettings) -> None:
-    _save_pending(e.coordinator, "backwash", settings)
-    await e.coordinator.client.async_set_backwash_settings(settings)
-
-def _eco_valve_from_data(d: PoolStatus) -> PoolEcoValveSettings:
-    return PoolEcoValveSettings(regulation=d.eco_valve_regulation, start_time=d.eco_valve_start_time, stop_time=d.eco_valve_stop_time)
-
-def _eco_valve(coordinator) -> PoolEcoValveSettings:
-    pending = _store(coordinator).get("eco_valve")
-    if pending:
-        return pending["value"]
-    return _eco_valve_from_data(coordinator.data)
-
-async def _commit_eco_valve(e, settings: PoolEcoValveSettings) -> None:
-    _save_pending(e.coordinator, "eco_valve", settings)
-    await e.coordinator.client.async_set_eco_valve_settings(settings)
-
-async def _set_light_start(e, v):
-    await e.coordinator.client.async_set_lighting_settings(schedule_start_time=v)
-async def _set_light_stop(e, v):
-    await e.coordinator.client.async_set_lighting_settings(schedule_stop_time=v)
-def _set_filter_time(idx: int, field: str):
-    async def setter(e, v):
-        settings = await e.coordinator.client.async_get_filter_settings()
-        setattr(getattr(settings, f"schedule_{idx}"), field, v)
-        await _commit_filter(e, settings)
-    return setter
-async def _set_backwash_start_time(e, v):
-    settings = await e.coordinator.client.async_get_backwash_settings(); settings.start_time = v
-    await _commit_backwash(e, settings)
-def _set_eco_valve_time(field: str):
-    async def setter(e, v):
-        settings = await e.coordinator.client.async_get_eco_valve_settings()
-        setattr(settings, field, v)
-        await _commit_eco_valve(e, settings)
     return setter
 
-TIMES = [
-    SmartPoolTimeDescription(key="lighting_start_time", translation_key="lighting_start_time", value_fn=lambda s: s.lighting_schedule_start_time, set_fn=_set_light_start),
-    SmartPoolTimeDescription(key="lighting_stop_time", translation_key="lighting_stop_time", value_fn=lambda s: s.lighting_schedule_stop_time, set_fn=_set_light_stop),
-    SmartPoolTimeDescription(key="backwash_start_time", translation_key="backwash_start_time", value_fn=lambda s: s.backwash_start_time, set_fn=_set_backwash_start_time),
-    SmartPoolTimeDescription(key="eco_valve_start_time", translation_key="eco_valve_start_time", value_fn=lambda s: s.eco_valve_start_time, set_fn=_set_eco_valve_time("start_time")),
-    SmartPoolTimeDescription(key="eco_valve_stop_time", translation_key="eco_valve_stop_time", value_fn=lambda s: s.eco_valve_stop_time, set_fn=_set_eco_valve_time("stop_time")),
-]
-for i in (1, 2, 3):
-    TIMES.append(SmartPoolTimeDescription(key=f"filter_schedule_{i}_start_time", translation_key=f"filter_schedule_{i}_start_time", value_fn=lambda s, idx=i: getattr(s, f"filter_schedule_{idx}_start_time"), set_fn=_set_filter_time(i, "start_time")))
-    TIMES.append(SmartPoolTimeDescription(key=f"filter_schedule_{i}_stop_time", translation_key=f"filter_schedule_{i}_stop_time", value_fn=lambda s, idx=i: getattr(s, f"filter_schedule_{idx}_stop_time"), set_fn=_set_filter_time(i, "stop_time")))
+
+async def _set_backwash_start(entity, value: str) -> None:
+    settings = await entity.coordinator.client.async_get_backwash_settings()
+    settings.start_time = value
+    await entity.coordinator.client.async_set_backwash_settings(settings)
+
+
+async def _set_eco_valve_start(entity, value: str) -> None:
+    settings = await entity.coordinator.client.async_get_eco_valve_settings()
+    settings.start_time = value
+    await entity.coordinator.client.async_set_eco_valve_settings(settings)
+
+
+async def _set_eco_valve_stop(entity, value: str) -> None:
+    settings = await entity.coordinator.client.async_get_eco_valve_settings()
+    settings.stop_time = value
+    await entity.coordinator.client.async_set_eco_valve_settings(settings)
+
+
+async def _set_temperature_schedule_start(entity, value: str) -> None:
+    await entity.coordinator.client.async_set_temperature_settings(
+        schedule_start_time=value
+    )
+
+
+async def _set_temperature_schedule_stop(entity, value: str) -> None:
+    await entity.coordinator.client.async_set_temperature_settings(
+        schedule_stop_time=value
+    )
+
+
+TIMES: tuple[SmartPoolTimeDescription, ...] = (
+    SmartPoolTimeDescription(
+        key="lighting_schedule_start_time",
+        translation_key="lighting_schedule_start_time",
+        icon="mdi:clock-start",
+        value_fn=lambda status: status.lighting_schedule_start_time,
+        set_fn=_set_lighting_start,
+    ),
+    SmartPoolTimeDescription(
+        key="lighting_schedule_stop_time",
+        translation_key="lighting_schedule_stop_time",
+        icon="mdi:clock-end",
+        value_fn=lambda status: status.lighting_schedule_stop_time,
+        set_fn=_set_lighting_stop,
+    ),
+    SmartPoolTimeDescription(
+        key="filter_schedule_1_start_time",
+        translation_key="filter_schedule_1_start_time",
+        icon="mdi:clock-start",
+        value_fn=lambda status: status.filter_schedule_1_start_time,
+        set_fn=_set_filter_schedule_time(1, "start_time"),
+    ),
+    SmartPoolTimeDescription(
+        key="filter_schedule_1_stop_time",
+        translation_key="filter_schedule_1_stop_time",
+        icon="mdi:clock-end",
+        value_fn=lambda status: status.filter_schedule_1_stop_time,
+        set_fn=_set_filter_schedule_time(1, "stop_time"),
+    ),
+    SmartPoolTimeDescription(
+        key="filter_schedule_2_start_time",
+        translation_key="filter_schedule_2_start_time",
+        icon="mdi:clock-start",
+        value_fn=lambda status: status.filter_schedule_2_start_time,
+        set_fn=_set_filter_schedule_time(2, "start_time"),
+    ),
+    SmartPoolTimeDescription(
+        key="filter_schedule_2_stop_time",
+        translation_key="filter_schedule_2_stop_time",
+        icon="mdi:clock-end",
+        value_fn=lambda status: status.filter_schedule_2_stop_time,
+        set_fn=_set_filter_schedule_time(2, "stop_time"),
+    ),
+    SmartPoolTimeDescription(
+        key="filter_schedule_3_start_time",
+        translation_key="filter_schedule_3_start_time",
+        icon="mdi:clock-start",
+        value_fn=lambda status: status.filter_schedule_3_start_time,
+        set_fn=_set_filter_schedule_time(3, "start_time"),
+    ),
+    SmartPoolTimeDescription(
+        key="filter_schedule_3_stop_time",
+        translation_key="filter_schedule_3_stop_time",
+        icon="mdi:clock-end",
+        value_fn=lambda status: status.filter_schedule_3_stop_time,
+        set_fn=_set_filter_schedule_time(3, "stop_time"),
+    ),
+    SmartPoolTimeDescription(
+        key="backwash_start_time",
+        translation_key="backwash_start_time",
+        icon="mdi:clock-start",
+        value_fn=lambda status: status.backwash_start_time,
+        set_fn=_set_backwash_start,
+    ),
+    SmartPoolTimeDescription(
+        key="eco_valve_start_time",
+        translation_key="eco_valve_start_time",
+        icon="mdi:clock-start",
+        value_fn=lambda status: status.eco_valve_start_time,
+        set_fn=_set_eco_valve_start,
+    ),
+    SmartPoolTimeDescription(
+        key="eco_valve_stop_time",
+        translation_key="eco_valve_stop_time",
+        icon="mdi:clock-end",
+        value_fn=lambda status: status.eco_valve_stop_time,
+        set_fn=_set_eco_valve_stop,
+    ),
+    SmartPoolTimeDescription(
+        key="temperature_schedule_start_time",
+        translation_key="temperature_schedule_start_time",
+        icon="mdi:clock-start",
+        value_fn=lambda status: status.temperature_schedule_start_time,
+        set_fn=_set_temperature_schedule_start,
+    ),
+    SmartPoolTimeDescription(
+        key="temperature_schedule_stop_time",
+        translation_key="temperature_schedule_stop_time",
+        icon="mdi:clock-end",
+        value_fn=lambda status: status.temperature_schedule_stop_time,
+        set_fn=_set_temperature_schedule_stop,
+    ),
+)
 
 NAMES = {
-    "lighting_start_time": "Lighting Schedule Start Time",
-    "lighting_stop_time": "Lighting Schedule Stop Time",
-    "backwash_start_time": "Backwash Setting Start Time",
+    "lighting_schedule_start_time": "Lighting Schedule Start Time",
+    "lighting_schedule_stop_time": "Lighting Schedule Stop Time",
+    "filter_schedule_1_start_time": "Filter Schedule 1 Start Time",
+    "filter_schedule_1_stop_time": "Filter Schedule 1 Stop Time",
+    "filter_schedule_2_start_time": "Filter Schedule 2 Start Time",
+    "filter_schedule_2_stop_time": "Filter Schedule 2 Stop Time",
+    "filter_schedule_3_start_time": "Filter Schedule 3 Start Time",
+    "filter_schedule_3_stop_time": "Filter Schedule 3 Stop Time",
+    "backwash_start_time": "Backwash Start Time",
     "eco_valve_start_time": "Eco Valve Start Time",
     "eco_valve_stop_time": "Eco Valve Stop Time",
+    "temperature_schedule_start_time": "Temperature Schedule Start Time",
+    "temperature_schedule_stop_time": "Temperature Schedule Stop Time",
 }
 
-for i in (1, 2, 3):
-    NAMES[f"filter_schedule_{i}_start_time"] = f"Filter Schedule {i} Start Time"
-    NAMES[f"filter_schedule_{i}_stop_time"] = f"Filter Schedule {i} Stop Time"
+_CAPABILITY_BY_KEY = {
+    "lighting_schedule_start_time": "lighting",
+    "lighting_schedule_stop_time": "lighting",
+    "filter_schedule_1_start_time": "filter",
+    "filter_schedule_1_stop_time": "filter",
+    "filter_schedule_2_start_time": "filter",
+    "filter_schedule_2_stop_time": "filter",
+    "filter_schedule_3_start_time": "filter",
+    "filter_schedule_3_stop_time": "filter",
+    "backwash_start_time": "backwash",
+    "eco_valve_start_time": "eco_valve",
+    "eco_valve_stop_time": "eco_valve",
+    "temperature_schedule_start_time": "temperature",
+    "temperature_schedule_stop_time": "temperature",
+}
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
-    async_add_entities(SmartPoolTime(entry.runtime_data, description) for description in TIMES)
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: SmartPoolConnectConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up time entities from detected capabilities."""
+
+    capabilities = (
+        entry.runtime_data.data.capabilities if entry.runtime_data.data else frozenset()
+    )
+    async_add_entities(
+        SmartPoolTime(entry.runtime_data, description)
+        for description in TIMES
+        if _CAPABILITY_BY_KEY[description.key] in capabilities
+    )
+
 
 class SmartPoolTime(SmartPoolConnectEntity, TimeEntity):
+    """Representation of a SmartPool time setting."""
+
     entity_description: SmartPoolTimeDescription
+
     def __init__(self, coordinator, description: SmartPoolTimeDescription) -> None:
         super().__init__(coordinator, description.key)
         self.entity_description = description
+        if description.key.startswith("temperature_"):
+            self._attr_translation_key = None
         self._attr_name = NAMES[description.key]
-        self._pending_value = None
-        self._pending_until = None
+
     @property
-    def native_value(self):
-        actual = None if self.coordinator.data is None else _parse(self.entity_description.value_fn(self.coordinator.data))
-        if self._pending_value is None:
-            return actual
-        if actual == self._pending_value:
-            self._pending_value = None; self._pending_until = None
-            return actual
-        if self._pending_until is not None and monotonic_time.monotonic() > self._pending_until:
-            self._pending_value = None; self._pending_until = None
-            return actual
-        return self._pending_value
-    async def async_set_value(self, value: time):
-        self._pending_value = value
-        self._pending_until = monotonic_time.monotonic() + PENDING_TIMEOUT_SECONDS
-        self.async_write_ha_state()
+    def available(self) -> bool:
+        if self.entity_description.key.startswith("temperature_"):
+            return bool(
+                super().available
+                and self.coordinator.data is not None
+                and self.coordinator.data.temperature_valid
+            )
+        return super().available
+
+    @property
+    def native_value(self) -> time | None:
+        if self.coordinator.data is None:
+            return None
+        value = self.entity_description.value_fn(self.coordinator.data)
+        if value is None:
+            return None
         try:
-            await self.entity_description.set_fn(self, _fmt(value))
-            await self.coordinator.async_request_refresh()
-        except Exception:
-            self._pending_value = None; self._pending_until = None
-            self.async_write_ha_state()
-            raise
+            return time.fromisoformat(value)
+        except ValueError:
+            return None
+
+    async def async_set_value(self, value: time) -> None:
+        await self.entity_description.set_fn(self, _format_time(value))
+        await self.coordinator.async_request_refresh()

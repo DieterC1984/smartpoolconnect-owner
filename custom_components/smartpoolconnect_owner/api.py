@@ -5,6 +5,7 @@ import base64
 from dataclasses import dataclass
 import json
 import logging
+import math
 import re
 import secrets
 from time import monotonic
@@ -14,7 +15,7 @@ from urllib.parse import urljoin
 import aiohttp
 
 from .const import DEFAULT_BASE_URL, DEFAULT_OAUTH_BASE_URL, PUMP_SPEEDS, SETTINGS_CACHE_INTERVAL
-from .devalue import RemixDecodeError, UNDEFINED, decode_remix, route_data
+from .devalue import RemixDecodeError, UNDEFINED, decode_remix, find_dicts, route_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,6 +115,24 @@ class PoolStatus:
     eco_valve_regulation: str | None = None
     eco_valve_start_time: str | None = None
     eco_valve_stop_time: str | None = None
+    zero_e_enabled: bool | None = None
+    zero_e_enable_threshold: float | None = None
+    zero_e_disable_threshold: float | None = None
+    zero_e_target_temperature: float | None = None
+    zero_e_valid: bool = False
+    temperature_target: float | None = None
+    temperature_interval: float | None = None
+    temperature_priority: bool | None = None
+    temperature_pump_speed: str | None = None
+    temperature_cooling_period: float | None = None
+    temperature_offset_water: float | None = None
+    temperature_offset_ambient: float | None = None
+    temperature_frost_protection: bool | None = None
+    temperature_schedule_start_time: str | None = None
+    temperature_schedule_stop_time: str | None = None
+    temperature_schedule_enabled: bool | None = None
+    temperature_schedule_days: tuple[str, ...] = ()
+    temperature_valid: bool = False
     water_temperature: float | None = None
     water_temperature_target: float | None = None
     outside_temperature: float | None = None
@@ -214,6 +233,47 @@ class PoolEcoValveSettings:
     missing_fields: tuple[str, ...] = ()
 
 
+@dataclass(slots=True)
+class PoolZeroESettings:
+    """Zero-E energy-aware temperature configuration."""
+
+    enabled: bool | None = None
+    threshold_enable: float | None = None
+    threshold_disable: float | None = None
+    threshold_temperature: float | None = None
+    detected: bool = False
+    valid: bool = False
+    missing_fields: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class PoolTemperatureSchedule:
+    """Temperature schedule configuration."""
+
+    start_time: str | None = None
+    stop_time: str | None = None
+    enabled: bool | None = None
+    days: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class PoolTemperatureSettings:
+    """Write-complete temperature configuration."""
+
+    target: float | None = None
+    interval: float | None = None
+    priority: bool | None = None
+    pump_speed: str | None = None
+    cooling_period: float | None = None
+    offset_water: float | None = None
+    offset_ambient: float | None = None
+    frost_protection: bool | None = None
+    schedule: PoolTemperatureSchedule | None = None
+    detected: bool = False
+    valid: bool = False
+    missing_fields: tuple[str, ...] = ()
+
+
 def _as_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -221,6 +281,15 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_finite_float(value: Any) -> float | None:
+    """Return a finite numeric value, rejecting booleans, NaN, and infinity."""
+
+    if isinstance(value, bool):
+        return None
+    converted = _as_float(value)
+    return converted if converted is not None and math.isfinite(converted) else None
 
 
 def _as_bool(value: Any) -> bool | None:
@@ -668,6 +737,192 @@ def _extract_devalue_eco_valve_settings(text: str, pool_id: str | None = None) -
         regulation=regulation, start_time=start_time, stop_time=stop_time,
         detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
     )
+
+
+def _extract_devalue_zero_e_settings(
+    text: Any,
+    pool_id: str | None = None,
+) -> PoolZeroESettings:
+    """Extract a write-complete Zero-E configuration from decoded route data.
+
+    The preferred source is the ``zero_e.config`` object in the pool route. A
+    semantic fallback accepts the same complete four-field object if the portal
+    moves it to a dedicated route in a future Remix build. Merely seeing Zero-E
+    telemetry or translated labels never makes an incomplete configuration
+    valid.
+    """
+
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "zero_e", pool_id=pool_id)
+    required = {
+        "enabled",
+        "threshold_enable",
+        "threshold_disable",
+        "threshold_temperature",
+    }
+
+    if config is None:
+        config = next(find_dicts(decoded, required), None)
+        if config is not None:
+            detected = True
+
+    missing = list(_missing(config, required))
+    if config is None:
+        return PoolZeroESettings(
+            detected=detected,
+            missing_fields=tuple(sorted(set(missing))),
+        )
+
+    enabled = _as_bool(config.get("enabled"))
+    threshold_enable = _as_finite_float(config.get("threshold_enable"))
+    threshold_disable = _as_finite_float(config.get("threshold_disable"))
+    threshold_temperature = _as_finite_float(config.get("threshold_temperature"))
+
+    for key, value in (
+        ("enabled", enabled),
+        ("threshold_enable", threshold_enable),
+        ("threshold_disable", threshold_disable),
+        ("threshold_temperature", threshold_temperature),
+    ):
+        if value is None:
+            missing.append(key)
+
+    if (
+        threshold_enable is not None
+        and threshold_disable is not None
+        and threshold_enable >= threshold_disable
+    ):
+        missing.append("threshold_order")
+
+    missing = sorted(set(missing))
+    return PoolZeroESettings(
+        enabled=enabled,
+        threshold_enable=threshold_enable,
+        threshold_disable=threshold_disable,
+        threshold_temperature=threshold_temperature,
+        detected=detected,
+        valid=detected and not missing,
+        missing_fields=tuple(missing),
+    )
+
+
+def _extract_devalue_temperature_settings(
+    text: Any,
+    pool_id: str | None = None,
+) -> PoolTemperatureSettings:
+    """Extract and validate every field required by the temperature PUT.
+
+    The dedicated temperature route in the supplied capture contains telemetry
+    but no configuration.  The write-complete object currently lives at
+    ``temperature.config`` in the generic pool route.  A semantic fallback
+    keeps the parser independent from Remix slot numbers and route placement,
+    while validity still requires the entire confirmed PUT contract.
+    """
+
+    decoded = _decode_route_response(text)
+    detected, config = _module_and_config(decoded, "temperature", pool_id=pool_id)
+    required = {
+        "target",
+        "interval",
+        "priority",
+        "pump_speed",
+        "cooling_period",
+        "offset_water",
+        "offset_ambient",
+        "frost_protection",
+        "schedule",
+    }
+
+    if config is None:
+        config = next(find_dicts(decoded, required), None)
+        if config is not None:
+            detected = True
+
+    missing = list(_missing(config, required))
+    schedule = config.get("schedule") if isinstance(config, dict) else None
+    schedule_required = {"start_time", "stop_time", "enabled", "days"}
+    if not isinstance(schedule, dict):
+        schedule = None
+        missing.extend(f"schedule.{key}" for key in sorted(schedule_required))
+    else:
+        missing.extend(
+            f"schedule.{key}"
+            for key in _missing(schedule, schedule_required)
+        )
+
+    if config is None:
+        return PoolTemperatureSettings(
+            detected=detected,
+            missing_fields=tuple(sorted(set(missing))),
+        )
+
+    target = _as_finite_float(config.get("target"))
+    interval = _as_finite_float(config.get("interval"))
+    priority = _as_bool(config.get("priority"))
+    pump_speed = (
+        config.get("pump_speed")
+        if config.get("pump_speed") in PUMP_SPEED_OPTIONS
+        else None
+    )
+    cooling_period = _as_finite_float(config.get("cooling_period"))
+    offset_water = _as_finite_float(config.get("offset_water"))
+    offset_ambient = _as_finite_float(config.get("offset_ambient"))
+    frost_protection = _as_bool(config.get("frost_protection"))
+    start_time = _valid_time(schedule.get("start_time")) if schedule else None
+    stop_time = _valid_time(schedule.get("stop_time")) if schedule else None
+    schedule_enabled = _as_bool(schedule.get("enabled")) if schedule else None
+    days = _valid_days(schedule.get("days")) if schedule else None
+
+    for key, value in (
+        ("target", target),
+        ("interval", interval),
+        ("priority", priority),
+        ("pump_speed", pump_speed),
+        ("cooling_period", cooling_period),
+        ("offset_water", offset_water),
+        ("offset_ambient", offset_ambient),
+        ("frost_protection", frost_protection),
+        ("schedule.start_time", start_time),
+        ("schedule.stop_time", stop_time),
+        ("schedule.enabled", schedule_enabled),
+        ("schedule.days", days),
+    ):
+        if value is None:
+            missing.append(key)
+
+    if interval is not None and interval < 0:
+        missing.append("interval")
+    if cooling_period is not None and cooling_period < 0:
+        missing.append("cooling_period")
+    if days is not None and len(set(days)) != len(days):
+        missing.append("schedule.days")
+
+    missing = sorted(set(missing))
+    return PoolTemperatureSettings(
+        target=target,
+        interval=interval,
+        priority=priority,
+        pump_speed=pump_speed,
+        cooling_period=cooling_period,
+        offset_water=offset_water,
+        offset_ambient=offset_ambient,
+        frost_protection=frost_protection,
+        schedule=PoolTemperatureSchedule(
+            start_time=start_time,
+            stop_time=stop_time,
+            enabled=schedule_enabled,
+            days=days or (),
+        ),
+        detected=detected,
+        valid=detected and not missing,
+        missing_fields=tuple(missing),
+    )
+
+
+def _format_form_number(value: float) -> str:
+    """Format numeric form values without adding a needless decimal suffix."""
+
+    return str(int(value)) if value.is_integer() else str(value)
 
 
 def _format_smartpool_date(value: str | None) -> str:
@@ -1149,6 +1404,232 @@ class SmartPoolConnectClient:
         await self._request_json("PUT", f"/pool/{self.pool_id}/filter/eco-valve.data", data={"regulation": settings.regulation, "start_time": settings.start_time, "stop_time": settings.stop_time}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
         self._invalidate_settings_cache()
 
+    async def async_get_zero_e_settings(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> PoolZeroESettings:
+        """Read Zero-E settings from the generic decoded pool route."""
+
+        try:
+            return _extract_devalue_zero_e_settings(
+                await self._get_pool_route_decoded(force_refresh=force_refresh),
+                self.pool_id,
+            )
+        except SmartPoolConnectError:
+            _LOGGER.debug("Could not read Zero-E settings from pool route data", exc_info=True)
+            return PoolZeroESettings()
+
+    async def async_set_zero_e_settings(
+        self,
+        *,
+        enabled: bool | None = None,
+        threshold_enable: float | None = None,
+        threshold_disable: float | None = None,
+        threshold_temperature: float | None = None,
+    ) -> None:
+        """Safely update exactly one Zero-E field using a fresh complete read."""
+
+        current = await self.async_get_zero_e_settings(force_refresh=True)
+        if not current.valid:
+            raise SmartPoolConnectError(
+                "Zero-E settings update aborted because the current controller settings could not be read completely"
+            )
+
+        new_enabled = current.enabled if enabled is None else enabled
+        new_threshold_enable = _as_finite_float(
+            current.threshold_enable if threshold_enable is None else threshold_enable
+        )
+        new_threshold_disable = _as_finite_float(
+            current.threshold_disable if threshold_disable is None else threshold_disable
+        )
+        new_threshold_temperature = _as_finite_float(
+            current.threshold_temperature
+            if threshold_temperature is None
+            else threshold_temperature
+        )
+
+        if (
+            not isinstance(new_enabled, bool)
+            or new_threshold_enable is None
+            or new_threshold_disable is None
+            or new_threshold_temperature is None
+        ):
+            raise SmartPoolConnectError(
+                "Zero-E settings update aborted because a proposed value is invalid"
+            )
+        if new_threshold_enable >= new_threshold_disable:
+            raise SmartPoolConnectError(
+                "Zero-E enable threshold must be lower than the disable threshold"
+            )
+
+        await self._request_json(
+            "PUT",
+            f"/pool/{self.pool_id}/temperature/zero-e.data",
+            data={
+                "enabled": "true" if new_enabled else "false",
+                "threshold_enable": _format_form_number(new_threshold_enable),
+                "threshold_disable": _format_form_number(new_threshold_disable),
+                "threshold_temperature": _format_form_number(new_threshold_temperature),
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        )
+        self._invalidate_settings_cache()
+
+    async def async_get_temperature_settings(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> PoolTemperatureSettings:
+        """Read the full temperature configuration from the decoded pool route."""
+
+        try:
+            return _extract_devalue_temperature_settings(
+                await self._get_pool_route_decoded(force_refresh=force_refresh),
+                self.pool_id,
+            )
+        except SmartPoolConnectError:
+            _LOGGER.debug(
+                "Could not read temperature settings from pool route data",
+                exc_info=True,
+            )
+            return PoolTemperatureSettings()
+
+    async def async_set_temperature_settings(
+        self,
+        *,
+        target: float | None = None,
+        interval: float | None = None,
+        priority: bool | None = None,
+        pump_speed: str | None = None,
+        cooling_period: float | None = None,
+        offset_water: float | None = None,
+        offset_ambient: float | None = None,
+        frost_protection: bool | None = None,
+        schedule_start_time: str | None = None,
+        schedule_stop_time: str | None = None,
+        schedule_enabled: bool | None = None,
+        schedule_days: tuple[str, ...] | None = None,
+        schedule_day: tuple[str, bool] | None = None,
+    ) -> None:
+        """Safely change one temperature field and PUT the complete fresh config."""
+
+        changes = {
+            "target": target,
+            "interval": interval,
+            "priority": priority,
+            "pump_speed": pump_speed,
+            "cooling_period": cooling_period,
+            "offset_water": offset_water,
+            "offset_ambient": offset_ambient,
+            "frost_protection": frost_protection,
+            "schedule_start_time": schedule_start_time,
+            "schedule_stop_time": schedule_stop_time,
+            "schedule_enabled": schedule_enabled,
+            "schedule_days": schedule_days,
+            "schedule_day": schedule_day,
+        }
+        changed_fields = [key for key, value in changes.items() if value is not None]
+        if len(changed_fields) != 1:
+            raise SmartPoolConnectError(
+                "A temperature update must change exactly one entity-owned field"
+            )
+
+        current = await self.async_get_temperature_settings(force_refresh=True)
+        schedule = current.schedule
+        if not current.valid or schedule is None:
+            raise SmartPoolConnectError(
+                "Temperature settings update aborted because the current controller settings could not be read completely"
+            )
+
+        new_target = _as_finite_float(current.target if target is None else target)
+        new_interval = _as_finite_float(current.interval if interval is None else interval)
+        new_priority = current.priority if priority is None else priority
+        new_pump_speed = current.pump_speed if pump_speed is None else pump_speed
+        new_cooling_period = _as_finite_float(
+            current.cooling_period if cooling_period is None else cooling_period
+        )
+        new_offset_water = _as_finite_float(
+            current.offset_water if offset_water is None else offset_water
+        )
+        new_offset_ambient = _as_finite_float(
+            current.offset_ambient if offset_ambient is None else offset_ambient
+        )
+        new_frost_protection = (
+            current.frost_protection
+            if frost_protection is None
+            else frost_protection
+        )
+        new_start_time = (
+            schedule.start_time
+            if schedule_start_time is None
+            else schedule_start_time
+        )
+        new_stop_time = (
+            schedule.stop_time
+            if schedule_stop_time is None
+            else schedule_stop_time
+        )
+        new_schedule_enabled = (
+            schedule.enabled if schedule_enabled is None else schedule_enabled
+        )
+        new_days = schedule.days if schedule_days is None else schedule_days
+        if schedule_day is not None:
+            day, included = schedule_day
+            if day not in DAYS or not isinstance(included, bool):
+                raise SmartPoolConnectError(
+                    "Temperature settings update aborted because a proposed schedule day is invalid"
+                )
+            day_set = set(schedule.days)
+            if included:
+                day_set.add(day)
+            else:
+                day_set.discard(day)
+            new_days = tuple(item for item in DAYS if item in day_set)
+
+        if (
+            new_target is None
+            or new_interval is None
+            or not isinstance(new_priority, bool)
+            or new_pump_speed not in PUMP_SPEED_OPTIONS
+            or new_cooling_period is None
+            or new_offset_water is None
+            or new_offset_ambient is None
+            or not isinstance(new_frost_protection, bool)
+            or _valid_time(new_start_time) is None
+            or _valid_time(new_stop_time) is None
+            or not isinstance(new_schedule_enabled, bool)
+            or not isinstance(new_days, tuple)
+            or _valid_days(list(new_days)) is None
+            or len(set(new_days)) != len(new_days)
+            or new_interval < 0
+            or new_cooling_period < 0
+        ):
+            raise SmartPoolConnectError(
+                "Temperature settings update aborted because a proposed value is invalid"
+            )
+
+        await self._request_json(
+            "PUT",
+            f"/pool/{self.pool_id}/temperature.data",
+            data={
+                "target": _format_form_number(new_target),
+                "interval": _format_form_number(new_interval),
+                "priority": "true" if new_priority else "false",
+                "pump_speed": new_pump_speed,
+                "cooling_period": _format_form_number(new_cooling_period),
+                "offset_water": _format_form_number(new_offset_water),
+                "offset_ambient": _format_form_number(new_offset_ambient),
+                "frost_protection": "true" if new_frost_protection else "false",
+                "schedule.start_time": new_start_time,
+                "schedule.stop_time": new_stop_time,
+                "schedule.enabled": "true" if new_schedule_enabled else "false",
+                "schedule.days": ",".join(new_days),
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        )
+        self._invalidate_settings_cache()
+
     async def async_get_cover_settings(self) -> PoolCoverSettings:
         try:
             return _extract_devalue_cover_settings(
@@ -1186,6 +1667,8 @@ class SmartPoolConnectClient:
             await self.async_get_filter_settings(),
             await self.async_get_backwash_settings(),
             await self.async_get_eco_valve_settings(),
+            await self.async_get_zero_e_settings(),
+            await self.async_get_temperature_settings(),
             await self.async_get_cover_settings(),
         )
         self._settings_bundle_cached_at = now
@@ -1198,7 +1681,17 @@ class SmartPoolConnectClient:
         except SmartPoolConnectError:
             pool = {}
         pool_name, ph, rx = await self._get_current_from_pool_data()
-        (ph_settings, rx_settings, lighting_settings, filter_settings, backwash_settings, eco_valve_settings, cover_settings) = await self._get_settings_bundle()
+        (
+            ph_settings,
+            rx_settings,
+            lighting_settings,
+            filter_settings,
+            backwash_settings,
+            eco_valve_settings,
+            zero_e_settings,
+            temperature_settings,
+            cover_settings,
+        ) = await self._get_settings_bundle()
         capabilities = frozenset(
             name
             for name, settings in (
@@ -1208,6 +1701,8 @@ class SmartPoolConnectClient:
                 ("filter", filter_settings),
                 ("backwash", backwash_settings),
                 ("eco_valve", eco_valve_settings),
+                ("zero_e", zero_e_settings),
+                ("temperature", temperature_settings),
                 ("cover", cover_settings),
             )
             if settings.detected
@@ -1215,6 +1710,9 @@ class SmartPoolConnectClient:
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
         fs3 = filter_settings.schedule_3 or PoolFilterSchedule()
+        temperature_schedule = (
+            temperature_settings.schedule or PoolTemperatureSchedule()
+        )
         lighting = _find_key(live, {"lighting"})
         heating_active = _find_key(live, {"_heating_pump_active"})
         heating = _find_key(live, {"heating", "heating_on"})
@@ -1236,7 +1734,9 @@ class SmartPoolConnectClient:
             filter_schedule_3_enabled=fs3.enabled, filter_schedule_3_pump_speed=fs3.pump_speed, filter_schedule_3_start_time=fs3.start_time, filter_schedule_3_stop_time=fs3.stop_time, filter_schedule_3_days=fs3.days,
             backwash_interval=backwash_settings.interval, backwash_rinse_duration=backwash_settings.rinse_duration, backwash_duration=backwash_settings.backwash_duration, backwash_pump_speed=backwash_settings.pump_speed, backwash_start_date=backwash_settings.start_date, backwash_start_time=backwash_settings.start_time,
             eco_valve_regulation=eco_valve_settings.regulation, eco_valve_start_time=eco_valve_settings.start_time, eco_valve_stop_time=eco_valve_settings.stop_time,
-            water_temperature=water_temperature, water_temperature_target=_as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=_cover_state(cover), cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, capabilities=capabilities, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
+            zero_e_enabled=zero_e_settings.enabled, zero_e_enable_threshold=zero_e_settings.threshold_enable, zero_e_disable_threshold=zero_e_settings.threshold_disable, zero_e_target_temperature=zero_e_settings.threshold_temperature, zero_e_valid=zero_e_settings.valid,
+            temperature_target=temperature_settings.target, temperature_interval=temperature_settings.interval, temperature_priority=temperature_settings.priority, temperature_pump_speed=temperature_settings.pump_speed, temperature_cooling_period=temperature_settings.cooling_period, temperature_offset_water=temperature_settings.offset_water, temperature_offset_ambient=temperature_settings.offset_ambient, temperature_frost_protection=temperature_settings.frost_protection, temperature_schedule_start_time=temperature_schedule.start_time, temperature_schedule_stop_time=temperature_schedule.stop_time, temperature_schedule_enabled=temperature_schedule.enabled, temperature_schedule_days=temperature_schedule.days, temperature_valid=temperature_settings.valid,
+            water_temperature=water_temperature, water_temperature_target=temperature_settings.target if temperature_settings.target is not None else _as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=_cover_state(cover), cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, capabilities=capabilities, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
 
     async def async_set_lighting(self, on: bool) -> None:
         await self.async_set_lighting_settings(always_active=on)

@@ -9,13 +9,6 @@
           "username": "E-mail",
           "password": "Password"
         }
-      },
-      "reauth_confirm": {
-        "title": "Reauthenticate SmartPoolConnect Owner",
-        "description": "Enter your new SmartPoolConnect password.",
-        "data": {
-          "password": "Password"
-        }
       }
     },
     "error": {
@@ -24,8 +17,83 @@
       "unknown": "Unexpected error."
     },
     "abort": {
-      "already_configured": "This pool is already configured.",
-      "reauth_successful": "Reauthentication was successful."
+      "already_configured": "This pool is already configured."
+    }
+  },
+  "entity": {
+    "switch": {
+      "zero_e_enabled": {
+        "name": "Zero-E enabled"
+      },
+      "temperature_priority": {
+        "name": "Temperature priority"
+      },
+      "temperature_frost_protection": {
+        "name": "Temperature frost protection"
+      },
+      "temperature_schedule_enabled": {
+        "name": "Temperature schedule enabled"
+      },
+      "temperature_schedule_monday": {
+        "name": "Temperature schedule Monday"
+      },
+      "temperature_schedule_tuesday": {
+        "name": "Temperature schedule Tuesday"
+      },
+      "temperature_schedule_wednesday": {
+        "name": "Temperature schedule Wednesday"
+      },
+      "temperature_schedule_thursday": {
+        "name": "Temperature schedule Thursday"
+      },
+      "temperature_schedule_friday": {
+        "name": "Temperature schedule Friday"
+      },
+      "temperature_schedule_saturday": {
+        "name": "Temperature schedule Saturday"
+      },
+      "temperature_schedule_sunday": {
+        "name": "Temperature schedule Sunday"
+      }
+    },
+    "number": {
+      "zero_e_enable_threshold": {
+        "name": "Zero-E enable threshold"
+      },
+      "zero_e_disable_threshold": {
+        "name": "Zero-E disable threshold"
+      },
+      "zero_e_target_temperature": {
+        "name": "Zero-E target temperature"
+      },
+      "temperature_target": {
+        "name": "Temperature target"
+      },
+      "temperature_interval": {
+        "name": "Temperature interval"
+      },
+      "temperature_cooling_period": {
+        "name": "Temperature cooling period"
+      },
+      "temperature_offset_water": {
+        "name": "Water temperature offset"
+      },
+      "temperature_offset_ambient": {
+        "name": "Ambient temperature offset"
+      }
+    },
+    "select": {
+      "temperature_pump_speed": {
+        "name": "Temperature pump speed"
+      }
+    },
+    "time": {
+      "temperature_schedule_start_time": {
+        "name": "Temperature schedule start time"
+      },
+      "temperature_schedule_stop_time": {
+        "name": "Temperature schedule stop time"
+      }
     }
   }
 }
