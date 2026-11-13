@@ -1,0 +1,117 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SmartPoolConnect Owner",
+        "description": "Meld aan met je SmartPoolConnect owner-gegevens en zwembad-UUID.",
+        "data": {
+          "pool_id": "Zwembad-UUID",
+          "username": "E-mail",
+          "password": "Wachtwoord"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Ongeldige aanmeldgegevens.",
+      "cannot_connect": "Kan geen verbinding maken met SmartPoolConnect.",
+      "unknown": "Onverwachte fout."
+    },
+    "abort": {
+      "already_configured": "Dit zwembad is al geconfigureerd."
+    }
+  },
+  "entity": {
+    "switch": {
+      "zero_e_enabled": {
+        "name": "Zero-E ingeschakeld"
+      },
+      "temperature_priority": {
+        "name": "Temperatuurprioriteit"
+      },
+      "temperature_frost_protection": {
+        "name": "Vorstbeveiliging temperatuurregeling"
+      },
+      "temperature_schedule_enabled": {
+        "name": "Temperatuurschema ingeschakeld"
+      },
+      "temperature_schedule_monday": {
+        "name": "Temperatuurschema maandag"
+      },
+      "temperature_schedule_tuesday": {
+        "name": "Temperatuurschema dinsdag"
+      },
+      "temperature_schedule_wednesday": {
+        "name": "Temperatuurschema woensdag"
+      },
+      "temperature_schedule_thursday": {
+        "name": "Temperatuurschema donderdag"
+      },
+      "temperature_schedule_friday": {
+        "name": "Temperatuurschema vrijdag"
+      },
+      "temperature_schedule_saturday": {
+        "name": "Temperatuurschema zaterdag"
+      },
+      "temperature_schedule_sunday": {
+        "name": "Temperatuurschema zondag"
+      }
+    },
+    "number": {
+      "ph_target": {
+        "name": "pH-doelwaarde"
+      },
+      "ph_dosing_time": {
+        "name": "pH-doseertijd"
+      },
+      "ph_pausing_time": {
+        "name": "pH-pauzetijd"
+      },
+      "rx_target": {
+        "name": "Rx-doelwaarde"
+      },
+      "rx_dosing_time": {
+        "name": "Rx-doseertijd"
+      },
+      "rx_pausing_time": {
+        "name": "Rx-pauzetijd"
+      },
+      "zero_e_enable_threshold": {
+        "name": "Zero-E inschakeldrempel"
+      },
+      "zero_e_disable_threshold": {
+        "name": "Zero-E uitschakeldrempel"
+      },
+      "zero_e_target_temperature": {
+        "name": "Zero-E doeltemperatuur"
+      },
+      "temperature_target": {
+        "name": "Temperatuurdoel"
+      },
+      "temperature_interval": {
+        "name": "Temperatuurinterval"
+      },
+      "temperature_cooling_period": {
+        "name": "Afkoelperiode"
+      },
+      "temperature_offset_water": {
+        "name": "Offset watertemperatuur"
+      },
+      "temperature_offset_ambient": {
+        "name": "Offset omgevingstemperatuur"
+      }
+    },
+    "select": {
+      "temperature_pump_speed": {
+        "name": "Pompsnelheid temperatuurregeling"
+      }
+    },
+    "time": {
+      "temperature_schedule_start_time": {
+        "name": "Starttijd temperatuurschema"
+      },
+      "temperature_schedule_stop_time": {
+        "name": "Stoptijd temperatuurschema"
+      }
+    }
+  }
+}
