@@ -12,7 +12,7 @@ Support is completely optional. The integration and all its features remain free
 
 Unofficial Home Assistant integration for SmartPoolConnect owner portals.
 
-This custom integration allows Home Assistant users to monitor and control supported SmartPoolConnect swimming pool functions through the SmartPoolConnect cloud portal from EPS (Europe Pool Supplies), and is designed for swimming pools equipped with the EPS Nexus Full Control system.
+This custom integration allows Home Assistant users to monitor and control supported SmartPoolConnect swimming pool functions through the SmartPoolConnect cloud portal from EPS (Europe Pool Supplies), and is designed for swimming pools equipped with the EPS Nexus Full Control system. Nexus II controller is currently in beta testing.
 
 > This project is not affiliated with, endorsed by, or supported by EPS.
 
