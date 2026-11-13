@@ -157,7 +157,7 @@ class PoolStatus:
     phnix_fail_0: int | None = None
     capabilities: frozenset[str] = frozenset()
     raw_live_status: dict[str, Any] | None = None
-    raw_v3_live_status: dict[str, Any] | None = None
+    raw_v3_status: dict[str, Any] | None = None
     raw_pool_status: dict[str, Any] | None = None
 
 
@@ -392,11 +392,11 @@ def _column_values(block: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
-    """Return validated Covco presence, position percentage, and state.
+    """Return validated Covco presence, position percentage, and endpoint state.
 
     Position is derived only from the encoder endpoints supplied by the
-    controller. Movement is derived from motor activity plus the requested
-    endpoint, rather than undocumented numeric position/direction enums.
+    controller. Movement is derived from measured motor activity and the
+    wished endpoint, so undocumented state/direction enums are not assumed.
     """
 
     values = _column_values(_find_data_block(data, "covco_data"))
@@ -418,38 +418,22 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
     position = max(0.0, min(100.0, (current_location - close_location) / span * 100.0))
     tolerance = min(hysteresis, abs(span) / 2)
     state = None
-    if abs(current_location - open_location) <= tolerance:
-        state = "open"
-    elif abs(current_location - close_location) <= tolerance:
-        state = "closed"
-
+    motor_power = _as_finite_float(values.get("motor_power_w")) or 0.0
+    motor_current = _as_finite_float(values.get("motor_current_a")) or 0.0
+    motor_ccr = _as_finite_float(values.get("ccr_motor")) or 0.0
     wished_location = _as_finite_float(values.get("wished_location"))
-    motor_power = _as_finite_float(values.get("motor_power_w"))
-    motor_current = _as_finite_float(values.get("motor_current_a"))
-    motor_drive = _as_finite_float(values.get("ccr_motor"))
-    control_state = _as_int(values.get("control_state"))
-    motor_active = (
-        (motor_power is not None and abs(motor_power) > 1.0)
-        or (motor_current is not None and abs(motor_current) > 0.1)
-        or (motor_drive is not None and abs(motor_drive) > 0)
-        or control_state == 4
-    )
+    motor_active = motor_power > 0.5 or motor_current > 0.05 or motor_ccr > 0
+
     if motor_active and wished_location is not None:
         if abs(wished_location - open_location) <= tolerance:
             state = "opening"
         elif abs(wished_location - close_location) <= tolerance:
             state = "closing"
+    elif abs(current_location - open_location) <= tolerance:
+        state = "open"
+    elif abs(current_location - close_location) <= tolerance:
+        state = "closed"
     return True, round(position, 1), state
-
-
-def _analogue_temperatures(data: Any) -> tuple[float | None, float | None]:
-    """Return controller water and ambient temperatures when available."""
-
-    values = _column_values(_find_data_block(data, "analoge_data"))
-    return (
-        _as_finite_float(values.get("water_t")),
-        _as_finite_float(values.get("ambient_t")),
-    )
 
 
 def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
@@ -477,6 +461,36 @@ def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
         and any(value not in (None, 0, 0.0) for value in temperatures)
     )
     return valid, telemetry if valid else {}
+
+
+def _analogue_telemetry(data: Any) -> dict[str, float | None]:
+    """Return calibrated analogue values exposed by the V3 controller API."""
+
+    values = _column_values(_find_data_block(data, "analoge_data"))
+    return {
+        "ph": _as_finite_float(values.get("ph")),
+        "rx": _as_finite_float(values.get("rx")),
+        "water_temperature": _as_finite_float(values.get("water_t")),
+        "ambient_temperature": _as_finite_float(values.get("ambient_t")),
+    }
+
+
+def _v3_filter_telemetry(data: Any) -> tuple[bool, str | None]:
+    """Return pump running state and speed from a V3 filter block."""
+
+    values = _column_values(_find_data_block(data, "filter_data"))
+    actual = _as_int(values.get("actual"))
+    if actual is None:
+        return False, None
+    return actual != 0, _pump_speed(actual)
+
+
+def _v3_lighting_state(data: Any) -> bool | None:
+    """Return the V3 lighting output state when its block is available."""
+
+    values = _column_values(_find_data_block(data, "lighting_data"))
+    active = _as_int(values.get("active"))
+    return None if active is None else active != 0
 
 
 def _decode_route_response(text: Any) -> Any | None:
@@ -1278,7 +1292,27 @@ class SmartPoolConnectClient:
 
     async def _validate_session(self) -> None:
         """Validate authentication against either supported live API family."""
-        await self._async_get_live_sources(reauthenticate=False)
+
+        errors: list[SmartPoolConnectError] = []
+        for path in (
+            f"/api/live-status/{self.pool_id}",
+            f"/api/v3-live/{self.pool_id}",
+        ):
+            try:
+                await self._request_text("GET", path)
+                return
+            except SmartPoolConnectError as err:
+                errors.append(err)
+
+        auth_error = next(
+            (err for err in errors if isinstance(err, AuthenticationError)),
+            None,
+        )
+        if auth_error is not None:
+            raise auth_error
+        if errors:
+            raise errors[0]
+        raise SmartPoolConnectError("No supported SmartPoolConnect live API was found")
 
     async def _request_text(self, method: str, path: str, **kwargs: Any) -> str:
         url = f"{self.base_url}{path}"
@@ -1311,61 +1345,71 @@ class SmartPoolConnectClient:
         except json.JSONDecodeError:
             return {"raw": text}
 
-    async def _async_get_live_sources(
+    async def _request_optional_json(
         self,
-        *,
-        reauthenticate: bool = True,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Fetch all usable live APIs without making either one a fallback.
+        path: str,
+    ) -> tuple[dict[str, Any] | None, SmartPoolConnectError | None]:
+        """Probe one optional JSON endpoint without forcing reauthentication.
 
-        SmartPoolConnect installations expose different API families. A source
-        may be absent or temporarily unavailable while the other remains fully
-        usable, so an update succeeds whenever at least one valid JSON object is
-        returned. Authentication failures are never hidden.
+        Some installations return 403 or 404 for the live API family they do
+        not implement. Authentication is therefore considered failed only if
+        neither supported live endpoint succeeds.
         """
 
-        sources: dict[str, dict[str, Any]] = {}
-        errors: list[SmartPoolConnectError] = []
-        for source_name, path in (
-            ("live_status", f"/api/live-status/{self.pool_id}"),
-            ("v3_live", f"/api/v3-live/{self.pool_id}"),
-        ):
-            try:
-                # Once one endpoint has succeeded, authentication is already
-                # proven and a 401/403 from the other endpoint means that API
-                # family is unavailable for this installation, not that the
-                # whole session must be refreshed.
-                requester = (
-                    self._request_text_with_reauth
-                    if reauthenticate and not sources
-                    else self._request_text
-                )
-                text = await requester("GET", path)
-                payload = json.loads(text) if text else None
-                if not isinstance(payload, dict) or not payload:
-                    raise SmartPoolConnectError(
-                        f"GET {path} returned no usable JSON object"
-                    )
-                sources[source_name] = payload
-            except (SmartPoolConnectError, json.JSONDecodeError) as err:
-                error = (
-                    err
-                    if isinstance(err, SmartPoolConnectError)
-                    else SmartPoolConnectError(f"GET {path} returned invalid JSON")
-                )
-                errors.append(error)
-                _LOGGER.debug("Live source %s is unavailable: %s", source_name, error)
+        try:
+            text = await self._request_text("GET", path)
+        except SmartPoolConnectError as err:
+            return None, err
+        if not text:
+            return {}, None
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError as err:
+            return None, SmartPoolConnectError(
+                f"GET {path} returned invalid JSON: {err}"
+            )
+        if not isinstance(decoded, dict):
+            return None, SmartPoolConnectError(
+                f"GET {path} returned a non-object JSON response"
+            )
+        return decoded, None
 
-        if not sources:
-            if errors:
-                authentication_error = next(
-                    (err for err in errors if isinstance(err, AuthenticationError)),
-                    None,
-                )
-                raise authentication_error or errors[0]
-            raise SmartPoolConnectError("No supported SmartPoolConnect live API is available")
+    async def _get_live_sources(
+        self,
+        *,
+        allow_reauth: bool = True,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Read both equal-status live API families, accepting either one."""
 
-        return sources.get("live_status", {}), sources.get("v3_live", {})
+        live, live_error = await self._request_optional_json(
+            f"/api/live-status/{self.pool_id}"
+        )
+        v3, v3_error = await self._request_optional_json(
+            f"/api/v3-live/{self.pool_id}"
+        )
+        if live is not None or v3 is not None:
+            return live, v3
+
+        errors = [err for err in (live_error, v3_error) if err is not None]
+        if allow_reauth and any(isinstance(err, AuthenticationError) for err in errors):
+            _LOGGER.warning(
+                "Both SmartPoolConnect live APIs failed; attempting re-login"
+            )
+            await self.async_login()
+            return await self._get_live_sources(allow_reauth=False)
+
+        auth_error = next(
+            (err for err in errors if isinstance(err, AuthenticationError)),
+            None,
+        )
+        if auth_error is not None:
+            raise auth_error
+        if errors:
+            raise SmartPoolConnectError(
+                "Neither /api/live-status nor /api/v3-live is available: "
+                + "; ".join(str(err) for err in errors)
+            )
+        raise SmartPoolConnectError("No supported SmartPoolConnect live API was found")
 
     def _invalidate_settings_cache(self) -> None:
         self._pool_route_text = None
@@ -1869,21 +1913,14 @@ class SmartPoolConnectClient:
         return self._settings_bundle
 
     async def async_get_status(self) -> PoolStatus:
-        live_status, v3_live = await self._async_get_live_sources()
-        if live_status and v3_live:
-            # Preserve live-status precedence for existing installations while
-            # allowing controller-specific v3 blocks to enrich the same model.
-            live: dict[str, Any] = {
-                "live_status": live_status,
-                "v3_live": v3_live,
-            }
-        else:
-            live = live_status or v3_live
-        try:
-            pool = await self._request_json("GET", f"/api/pool-status/{self.pool_id}")
-        except SmartPoolConnectError:
-            pool = {}
-        pool_name, ph, rx = await self._get_current_from_pool_data()
+        """Return one normalized status from either or both live API families."""
+
+        live, v3 = await self._get_live_sources()
+        pool, _pool_error = await self._request_optional_json(
+            f"/api/pool-status/{self.pool_id}"
+        )
+        pool = pool or {}
+        pool_name, portal_ph, portal_rx = await self._get_current_from_pool_data()
         (
             ph_settings,
             rx_settings,
@@ -1895,11 +1932,10 @@ class SmartPoolConnectClient:
             temperature_settings,
             cover_settings,
         ) = await self._get_settings_bundle()
+
         capabilities = {
             name
             for name, settings in (
-                ("ph", ph_settings),
-                ("rx", rx_settings),
                 ("lighting", lighting_settings),
                 ("filter", filter_settings),
                 ("backwash", backwash_settings),
@@ -1907,9 +1943,12 @@ class SmartPoolConnectClient:
             )
             if settings.detected
         }
-        # Settings entities can write to physical equipment.  Expose those
-        # capabilities only after the complete, validated portal contract was
-        # read; block presence alone is not sufficient.
+        if ph_settings.valid:
+            capabilities.add("ph")
+        if rx_settings.valid:
+            capabilities.add("rx")
+        # Settings entities can write to physical equipment. Expose these
+        # capabilities only after the complete portal contract was validated.
         capabilities.update(
             name
             for name, settings in (
@@ -1919,59 +1958,229 @@ class SmartPoolConnectClient:
             )
             if settings.valid
         )
+        if live is not None:
+            capabilities.add("live_status_api")
+        if v3 is not None:
+            capabilities.add("v3_live_api")
+
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
         fs3 = filter_settings.schedule_3 or PoolFilterSchedule()
         temperature_schedule = (
             temperature_settings.schedule or PoolTemperatureSchedule()
         )
-        lighting = _find_key(live, {"lighting"})
-        heating_active = _find_key(live, {"_heating_pump_active"})
-        heating = _find_key(live, {"heating", "heating_on"})
-        cover = _find_key(live, {"cover"})
-        pump_status = _find_key(live, {"pump_status"})
-        pump_speed = _find_key(live, {"pump_speed"})
-        standard_cover_state = _cover_state(cover)
-        covco_valid, covco_position, covco_state = _covco_telemetry(live)
-        phnix_valid, phnix = _phnix_telemetry(live)
+
+        analogue = _analogue_telemetry(v3)
+        standard_cover_state = _cover_state(
+            _find_key(live, {"cover"}) if live is not None else None
+        )
+        covco_valid, covco_position, covco_state = _covco_telemetry(v3)
+        phnix_valid, phnix = _phnix_telemetry(v3)
+        v3_pump_status, v3_pump_speed = _v3_filter_telemetry(v3)
+        v3_lighting = _v3_lighting_state(v3)
+
         if standard_cover_state is not None:
             capabilities.add("cover_status")
         if covco_valid:
             capabilities.add("covco_cover")
         if phnix_valid:
             capabilities.add("phnix_heat_pump")
-        if live_status:
-            capabilities.add("live_status_api")
-        if v3_live:
-            capabilities.add("v3_live_api")
+        if _find_data_block(v3, "lighting_data") is not None:
+            capabilities.add("v3_lighting")
+
         frozen_capabilities = frozenset(capabilities)
         self._last_capabilities = frozen_capabilities
-        analogue_water_temperature, analogue_ambient_temperature = _analogue_temperatures(live)
-        water_temperature = _as_float(_find_key(live, {"water_temp", "water_temperature", "temperature"}))
+
+        live_ph = _as_float(_find_key(live, {"ph"})) if live is not None else None
+        live_rx = (
+            _as_float(_find_key(live, {"rx", "orp"}))
+            if live is not None
+            else None
+        )
+        ph = portal_ph if portal_ph is not None else live_ph
+        if ph is None:
+            ph = analogue["ph"]
+        rx = portal_rx if portal_rx is not None else live_rx
+        if rx is None:
+            rx = analogue["rx"]
+
+        water_temperature = (
+            _as_float(
+                _find_key(live, {"water_temp", "water_temperature", "temperature"})
+            )
+            if live is not None
+            else None
+        )
         if water_temperature is None:
-            water_temperature = analogue_water_temperature
+            water_temperature = _as_float(
+                _find_key(pool, {"water_temp", "water_temperature", "temperature"})
+            )
         if water_temperature is None:
-            water_temperature = _as_float(_find_key(pool, {"water_temp", "water_temperature", "temperature"}))
-        outside_temperature = _as_float(_find_key(pool, {"outside_temp", "outside_temperature"}))
+            water_temperature = analogue["water_temperature"]
+
+        live_pump_status = (
+            _find_key(live, {"pump_status"}) if live is not None else None
+        )
+        live_pump_speed = _pump_speed(
+            _find_key(live, {"pump_speed"}) if live is not None else None
+        )
+        pump_status = (
+            bool(live_pump_status)
+            if live_pump_status is not None
+            else v3_pump_status if v3_pump_speed is not None else None
+        )
+        pump_speed = live_pump_speed or v3_pump_speed
+
+        live_lighting = _find_key(live, {"lighting"}) if live is not None else None
+        lighting_on = (
+            lighting_settings.always_active
+            if lighting_settings.always_active is not None
+            else (live_lighting not in (None, -1, 0))
+            if live_lighting is not None
+            else v3_lighting
+        )
+        heating_active = (
+            _find_key(live, {"_heating_pump_active"})
+            if live is not None
+            else None
+        )
+        heating = (
+            _find_key(live, {"heating", "heating_on"})
+            if live is not None
+            else None
+        )
+        heating_on = (
+            bool(heating_active)
+            if heating_active is not None
+            else bool(heating)
+            if heating not in (None, -1)
+            else None
+        )
+        outside_temperature = _as_float(
+            _find_key(pool, {"outside_temp", "outside_temperature"})
+        )
         if outside_temperature is None:
-            outside_temperature = analogue_ambient_temperature
-        live_pump_speed = _pump_speed(pump_speed)
+            outside_temperature = analogue["ambient_temperature"]
+
         return PoolStatus(
-            pool_id=self.pool_id, name=pool_name or _find_key(pool, {"name", "pool_name"}), online=True, ph=ph,
-            ph_target=ph_settings.target if ph_settings.target is not None else _as_float(_find_key(pool, {"ph_target", "target_ph"})), ph_dosing_time=ph_settings.dosing_time, ph_pausing_time=ph_settings.pausing_time,
-            rx=rx, rx_target=rx_settings.target if rx_settings.target is not None else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"})), rx_dosing_time=rx_settings.dosing_time, rx_pausing_time=rx_settings.pausing_time,
-            lighting_on=lighting_settings.always_active if lighting_settings.always_active is not None else (lighting not in (None, -1, 0)), lighting_always_active=lighting_settings.always_active, lighting_cover_disabled=lighting_settings.cover_disabled, lighting_schedule_enabled=lighting_settings.schedule_enabled, lighting_schedule_start_time=lighting_settings.schedule_start_time, lighting_schedule_stop_time=lighting_settings.schedule_stop_time, lighting_schedule_days=lighting_settings.schedule_days,
-            filter_always_active=filter_settings.always_active, filter_pump_speed=filter_settings.pump_speed or live_pump_speed,
-            filter_schedule_1_enabled=fs1.enabled, filter_schedule_1_pump_speed=fs1.pump_speed, filter_schedule_1_start_time=fs1.start_time, filter_schedule_1_stop_time=fs1.stop_time, filter_schedule_1_days=fs1.days,
-            filter_schedule_2_enabled=fs2.enabled, filter_schedule_2_pump_speed=fs2.pump_speed, filter_schedule_2_start_time=fs2.start_time, filter_schedule_2_stop_time=fs2.stop_time, filter_schedule_2_days=fs2.days,
-            filter_schedule_3_enabled=fs3.enabled, filter_schedule_3_pump_speed=fs3.pump_speed, filter_schedule_3_start_time=fs3.start_time, filter_schedule_3_stop_time=fs3.stop_time, filter_schedule_3_days=fs3.days,
-            backwash_interval=backwash_settings.interval, backwash_rinse_duration=backwash_settings.rinse_duration, backwash_duration=backwash_settings.backwash_duration, backwash_pump_speed=backwash_settings.pump_speed, backwash_start_date=backwash_settings.start_date, backwash_start_time=backwash_settings.start_time,
-            eco_valve_regulation=eco_valve_settings.regulation, eco_valve_start_time=eco_valve_settings.start_time, eco_valve_stop_time=eco_valve_settings.stop_time,
-            zero_e_enabled=zero_e_settings.enabled, zero_e_enable_threshold=zero_e_settings.threshold_enable, zero_e_disable_threshold=zero_e_settings.threshold_disable, zero_e_target_temperature=zero_e_settings.threshold_temperature, zero_e_valid=zero_e_settings.valid,
-            temperature_target=temperature_settings.target, temperature_interval=temperature_settings.interval, temperature_priority=temperature_settings.priority, temperature_pump_speed=temperature_settings.pump_speed, temperature_cooling_period=temperature_settings.cooling_period, temperature_offset_water=temperature_settings.offset_water, temperature_offset_ambient=temperature_settings.offset_ambient, temperature_frost_protection=temperature_settings.frost_protection, temperature_schedule_start_time=temperature_schedule.start_time, temperature_schedule_stop_time=temperature_schedule.stop_time, temperature_schedule_enabled=temperature_schedule.enabled, temperature_schedule_days=temperature_schedule.days, temperature_valid=temperature_settings.valid,
-            water_temperature=water_temperature, water_temperature_target=temperature_settings.target if temperature_settings.target is not None else _as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=outside_temperature, solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=standard_cover_state or covco_state, cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, covco_cover_position=covco_position, phnix_setpoint=phnix.get("setpoint"), phnix_inlet_temperature=phnix.get("inlet"), phnix_outlet_temperature=phnix.get("outlet"), phnix_coil_temperature=phnix.get("coil"), phnix_ambient_temperature=phnix.get("ambient"), phnix_mode=phnix.get("mode"), phnix_sub_mode=phnix.get("sub_mode"), phnix_error=phnix.get("error"), phnix_fail_0=phnix.get("fail_0"), capabilities=frozen_capabilities, raw_live_status=live_status or None, raw_v3_live_status=v3_live or None, raw_pool_status=pool if isinstance(pool, dict) else None)
+            pool_id=self.pool_id,
+            name=pool_name or _find_key(pool, {"name", "pool_name"}),
+            online=True,
+            ph=ph,
+            ph_target=(
+                ph_settings.target
+                if ph_settings.target is not None
+                else _as_float(_find_key(pool, {"ph_target", "target_ph"}))
+            ),
+            ph_dosing_time=ph_settings.dosing_time,
+            ph_pausing_time=ph_settings.pausing_time,
+            rx=rx,
+            rx_target=(
+                rx_settings.target
+                if rx_settings.target is not None
+                else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"}))
+            ),
+            rx_dosing_time=rx_settings.dosing_time,
+            rx_pausing_time=rx_settings.pausing_time,
+            lighting_on=lighting_on,
+            lighting_always_active=lighting_settings.always_active,
+            lighting_cover_disabled=lighting_settings.cover_disabled,
+            lighting_schedule_enabled=lighting_settings.schedule_enabled,
+            lighting_schedule_start_time=lighting_settings.schedule_start_time,
+            lighting_schedule_stop_time=lighting_settings.schedule_stop_time,
+            lighting_schedule_days=lighting_settings.schedule_days,
+            filter_always_active=filter_settings.always_active,
+            filter_pump_speed=filter_settings.pump_speed or pump_speed,
+            filter_schedule_1_enabled=fs1.enabled,
+            filter_schedule_1_pump_speed=fs1.pump_speed,
+            filter_schedule_1_start_time=fs1.start_time,
+            filter_schedule_1_stop_time=fs1.stop_time,
+            filter_schedule_1_days=fs1.days,
+            filter_schedule_2_enabled=fs2.enabled,
+            filter_schedule_2_pump_speed=fs2.pump_speed,
+            filter_schedule_2_start_time=fs2.start_time,
+            filter_schedule_2_stop_time=fs2.stop_time,
+            filter_schedule_2_days=fs2.days,
+            filter_schedule_3_enabled=fs3.enabled,
+            filter_schedule_3_pump_speed=fs3.pump_speed,
+            filter_schedule_3_start_time=fs3.start_time,
+            filter_schedule_3_stop_time=fs3.stop_time,
+            filter_schedule_3_days=fs3.days,
+            backwash_interval=backwash_settings.interval,
+            backwash_rinse_duration=backwash_settings.rinse_duration,
+            backwash_duration=backwash_settings.backwash_duration,
+            backwash_pump_speed=backwash_settings.pump_speed,
+            backwash_start_date=backwash_settings.start_date,
+            backwash_start_time=backwash_settings.start_time,
+            eco_valve_regulation=eco_valve_settings.regulation,
+            eco_valve_start_time=eco_valve_settings.start_time,
+            eco_valve_stop_time=eco_valve_settings.stop_time,
+            zero_e_enabled=zero_e_settings.enabled,
+            zero_e_enable_threshold=zero_e_settings.threshold_enable,
+            zero_e_disable_threshold=zero_e_settings.threshold_disable,
+            zero_e_target_temperature=zero_e_settings.threshold_temperature,
+            zero_e_valid=zero_e_settings.valid,
+            temperature_target=temperature_settings.target,
+            temperature_interval=temperature_settings.interval,
+            temperature_priority=temperature_settings.priority,
+            temperature_pump_speed=temperature_settings.pump_speed,
+            temperature_cooling_period=temperature_settings.cooling_period,
+            temperature_offset_water=temperature_settings.offset_water,
+            temperature_offset_ambient=temperature_settings.offset_ambient,
+            temperature_frost_protection=temperature_settings.frost_protection,
+            temperature_schedule_start_time=temperature_schedule.start_time,
+            temperature_schedule_stop_time=temperature_schedule.stop_time,
+            temperature_schedule_enabled=temperature_schedule.enabled,
+            temperature_schedule_days=temperature_schedule.days,
+            temperature_valid=temperature_settings.valid,
+            water_temperature=water_temperature,
+            water_temperature_target=(
+                temperature_settings.target
+                if temperature_settings.target is not None
+                else _as_float(
+                    _find_key(
+                        pool,
+                        {"water_temperature_target", "temperature_target", "setpoint"},
+                    )
+                )
+            ),
+            outside_temperature=outside_temperature,
+            solar_temperature=_as_float(
+                _find_key(pool, {"solar_temp", "solar_temperature"})
+            ),
+            pump_speed=pump_speed,
+            pump_status=pump_status,
+            heating_on=heating_on,
+            cover_state=standard_cover_state or covco_state,
+            cover_protection=cover_settings.protection,
+            cover_pump_open=cover_settings.pump_open,
+            cover_pump_close=cover_settings.pump_close,
+            cover_pump_low_speed=cover_settings.pump_low_speed,
+            covco_cover_position=covco_position,
+            phnix_setpoint=phnix.get("setpoint"),
+            phnix_inlet_temperature=phnix.get("inlet"),
+            phnix_outlet_temperature=phnix.get("outlet"),
+            phnix_coil_temperature=phnix.get("coil"),
+            phnix_ambient_temperature=phnix.get("ambient"),
+            phnix_mode=phnix.get("mode"),
+            phnix_sub_mode=phnix.get("sub_mode"),
+            phnix_error=phnix.get("error"),
+            phnix_fail_0=phnix.get("fail_0"),
+            capabilities=frozen_capabilities,
+            raw_live_status=live,
+            raw_v3_status=v3,
+            raw_pool_status=pool,
+        )
 
     async def async_set_lighting(self, on: bool) -> None:
+        if "v3_lighting" in self._last_capabilities:
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/lighting_config",
+                json={"enabled": 3 if on else 1},
+                headers={"Content-Type": "application/json"},
+            )
+            return
         await self.async_set_lighting_settings(always_active=on)
 
     async def async_set_pump_speed(self, speed: str) -> None:
@@ -1982,6 +2191,14 @@ class SmartPoolConnectClient:
         await self.async_set_filter_settings(filter_settings)
 
     async def async_cover_open(self) -> None:
+        if "covco_cover" in self._last_capabilities:
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/covco_data",
+                json={"automatic_movement_open": True},
+                headers={"Content-Type": "application/json"},
+            )
+            return
         if "cover" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
@@ -1989,6 +2206,14 @@ class SmartPoolConnectClient:
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_open", headers={"Content-Type": "application/json"})
 
     async def async_cover_close(self) -> None:
+        if "covco_cover" in self._last_capabilities:
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/covco_data",
+                json={"automatic_movement_close": True},
+                headers={"Content-Type": "application/json"},
+            )
+            return
         if "cover" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
@@ -1996,6 +2221,14 @@ class SmartPoolConnectClient:
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_close", headers={"Content-Type": "application/json"})
 
     async def async_cover_stop(self) -> None:
+        if "covco_cover" in self._last_capabilities:
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/covco_data",
+                json={"automatic_movement_stop": True},
+                headers={"Content-Type": "application/json"},
+            )
+            return
         if "cover" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"

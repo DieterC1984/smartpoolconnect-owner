@@ -58,7 +58,7 @@ async def _commit_lighting(e, settings: PoolLightingSettings) -> None:
     )
 
 async def _set_lighting_always(e, v):
-    await e.coordinator.client.async_set_lighting_settings(always_active=v)
+    await e.coordinator.client.async_set_lighting(v)
 async def _set_lighting_cover_disabled(e, v):
     await e.coordinator.client.async_set_lighting_settings(cover_disabled=v)
 async def _set_lighting_schedule_enabled(e, v):
@@ -248,6 +248,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
         for description in SWITCHES
         if (
             (description.key != "zero_e_enabled" or "zero_e" in capabilities)
+            and (
+                not description.key.startswith("lighting")
+                or (
+                    description.key == "lighting"
+                    and bool({"lighting", "v3_lighting"} & capabilities)
+                )
+                or "lighting" in capabilities
+            )
             and (
                 description.key not in COVER_SETTING_KEYS
                 or "cover" in capabilities

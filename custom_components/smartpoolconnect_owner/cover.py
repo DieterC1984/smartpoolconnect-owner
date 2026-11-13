@@ -23,7 +23,7 @@ async def async_setup_entry(
     """Set up control only for a validated, write-capable cover."""
 
     status = entry.runtime_data.data
-    if status is None or "cover" not in status.capabilities:
+    if status is None or not {"cover", "covco_cover"} & status.capabilities:
         return
     async_add_entities([PoolCover(entry.runtime_data)])
 
@@ -41,6 +41,12 @@ class PoolCover(SmartPoolConnectEntity, CoverEntity):
     def __init__(self, coordinator):
         super().__init__(coordinator, "cover")
         self._attr_name = "Pool Cover"
+        # Keep legacy control opt-in, but expose the newly confirmed Covco
+        # command contract by default for V3 installations.
+        self._attr_entity_registry_enabled_default = bool(
+            coordinator.data
+            and "covco_cover" in coordinator.data.capabilities
+        )
 
     @property
     def is_closed(self) -> bool | None:

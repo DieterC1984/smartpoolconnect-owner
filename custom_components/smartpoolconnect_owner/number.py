@@ -146,7 +146,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
         SmartPoolNumber(entry.runtime_data, description)
         for description in NUMBERS
         if (
-            (not description.key.startswith("zero_e_") or "zero_e" in capabilities)
+            (not description.key.startswith("ph_") or "ph" in capabilities)
+            and (not description.key.startswith("rx_") or "rx" in capabilities)
+            and (not description.key.startswith("zero_e_") or "zero_e" in capabilities)
             and (
                 not description.key.startswith("temperature_")
                 or "temperature" in capabilities

@@ -57,6 +57,24 @@
       }
     },
     "number": {
+      "ph_target": {
+        "name": "pH target"
+      },
+      "ph_dosing_time": {
+        "name": "pH dosing time"
+      },
+      "ph_pausing_time": {
+        "name": "pH pause time"
+      },
+      "rx_target": {
+        "name": "Rx target"
+      },
+      "rx_dosing_time": {
+        "name": "Rx dosing time"
+      },
+      "rx_pausing_time": {
+        "name": "Rx pause time"
+      },
       "zero_e_enable_threshold": {
         "name": "Zero-E enable threshold"
       },
