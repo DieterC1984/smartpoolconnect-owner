@@ -157,6 +157,7 @@ class PoolStatus:
     phnix_fail_0: int | None = None
     capabilities: frozenset[str] = frozenset()
     raw_live_status: dict[str, Any] | None = None
+    raw_v3_live_status: dict[str, Any] | None = None
     raw_pool_status: dict[str, Any] | None = None
 
 
@@ -391,11 +392,11 @@ def _column_values(block: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
-    """Return validated Covco presence, position percentage, and endpoint state.
+    """Return validated Covco presence, position percentage, and state.
 
     Position is derived only from the encoder endpoints supplied by the
-    controller.  Intermediate ``position_state`` values are intentionally not
-    interpreted until captures for all states are available.
+    controller. Movement is derived from motor activity plus the requested
+    endpoint, rather than undocumented numeric position/direction enums.
     """
 
     values = _column_values(_find_data_block(data, "covco_data"))
@@ -421,7 +422,34 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
         state = "open"
     elif abs(current_location - close_location) <= tolerance:
         state = "closed"
+
+    wished_location = _as_finite_float(values.get("wished_location"))
+    motor_power = _as_finite_float(values.get("motor_power_w"))
+    motor_current = _as_finite_float(values.get("motor_current_a"))
+    motor_drive = _as_finite_float(values.get("ccr_motor"))
+    control_state = _as_int(values.get("control_state"))
+    motor_active = (
+        (motor_power is not None and abs(motor_power) > 1.0)
+        or (motor_current is not None and abs(motor_current) > 0.1)
+        or (motor_drive is not None and abs(motor_drive) > 0)
+        or control_state == 4
+    )
+    if motor_active and wished_location is not None:
+        if abs(wished_location - open_location) <= tolerance:
+            state = "opening"
+        elif abs(wished_location - close_location) <= tolerance:
+            state = "closing"
     return True, round(position, 1), state
+
+
+def _analogue_temperatures(data: Any) -> tuple[float | None, float | None]:
+    """Return controller water and ambient temperatures when available."""
+
+    values = _column_values(_find_data_block(data, "analoge_data"))
+    return (
+        _as_finite_float(values.get("water_t")),
+        _as_finite_float(values.get("ambient_t")),
+    )
 
 
 def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
@@ -1249,11 +1277,8 @@ class SmartPoolConnectClient:
             _LOGGER.exception("Could not dump cookie names")
 
     async def _validate_session(self) -> None:
-        """Validate authentication without triggering reauthentication."""
-        await self._request_text(
-            "GET",
-            f"/api/live-status/{self.pool_id}",
-        )
+        """Validate authentication against either supported live API family."""
+        await self._async_get_live_sources(reauthenticate=False)
 
     async def _request_text(self, method: str, path: str, **kwargs: Any) -> str:
         url = f"{self.base_url}{path}"
@@ -1285,6 +1310,62 @@ class SmartPoolConnectClient:
             return json.loads(text)
         except json.JSONDecodeError:
             return {"raw": text}
+
+    async def _async_get_live_sources(
+        self,
+        *,
+        reauthenticate: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Fetch all usable live APIs without making either one a fallback.
+
+        SmartPoolConnect installations expose different API families. A source
+        may be absent or temporarily unavailable while the other remains fully
+        usable, so an update succeeds whenever at least one valid JSON object is
+        returned. Authentication failures are never hidden.
+        """
+
+        sources: dict[str, dict[str, Any]] = {}
+        errors: list[SmartPoolConnectError] = []
+        for source_name, path in (
+            ("live_status", f"/api/live-status/{self.pool_id}"),
+            ("v3_live", f"/api/v3-live/{self.pool_id}"),
+        ):
+            try:
+                # Once one endpoint has succeeded, authentication is already
+                # proven and a 401/403 from the other endpoint means that API
+                # family is unavailable for this installation, not that the
+                # whole session must be refreshed.
+                requester = (
+                    self._request_text_with_reauth
+                    if reauthenticate and not sources
+                    else self._request_text
+                )
+                text = await requester("GET", path)
+                payload = json.loads(text) if text else None
+                if not isinstance(payload, dict) or not payload:
+                    raise SmartPoolConnectError(
+                        f"GET {path} returned no usable JSON object"
+                    )
+                sources[source_name] = payload
+            except (SmartPoolConnectError, json.JSONDecodeError) as err:
+                error = (
+                    err
+                    if isinstance(err, SmartPoolConnectError)
+                    else SmartPoolConnectError(f"GET {path} returned invalid JSON")
+                )
+                errors.append(error)
+                _LOGGER.debug("Live source %s is unavailable: %s", source_name, error)
+
+        if not sources:
+            if errors:
+                authentication_error = next(
+                    (err for err in errors if isinstance(err, AuthenticationError)),
+                    None,
+                )
+                raise authentication_error or errors[0]
+            raise SmartPoolConnectError("No supported SmartPoolConnect live API is available")
+
+        return sources.get("live_status", {}), sources.get("v3_live", {})
 
     def _invalidate_settings_cache(self) -> None:
         self._pool_route_text = None
@@ -1788,7 +1869,16 @@ class SmartPoolConnectClient:
         return self._settings_bundle
 
     async def async_get_status(self) -> PoolStatus:
-        live = await self._request_json("GET", f"/api/live-status/{self.pool_id}")
+        live_status, v3_live = await self._async_get_live_sources()
+        if live_status and v3_live:
+            # Preserve live-status precedence for existing installations while
+            # allowing controller-specific v3 blocks to enrich the same model.
+            live: dict[str, Any] = {
+                "live_status": live_status,
+                "v3_live": v3_live,
+            }
+        else:
+            live = live_status or v3_live
         try:
             pool = await self._request_json("GET", f"/api/pool-status/{self.pool_id}")
         except SmartPoolConnectError:
@@ -1850,11 +1940,21 @@ class SmartPoolConnectClient:
             capabilities.add("covco_cover")
         if phnix_valid:
             capabilities.add("phnix_heat_pump")
+        if live_status:
+            capabilities.add("live_status_api")
+        if v3_live:
+            capabilities.add("v3_live_api")
         frozen_capabilities = frozenset(capabilities)
         self._last_capabilities = frozen_capabilities
+        analogue_water_temperature, analogue_ambient_temperature = _analogue_temperatures(live)
         water_temperature = _as_float(_find_key(live, {"water_temp", "water_temperature", "temperature"}))
         if water_temperature is None:
+            water_temperature = analogue_water_temperature
+        if water_temperature is None:
             water_temperature = _as_float(_find_key(pool, {"water_temp", "water_temperature", "temperature"}))
+        outside_temperature = _as_float(_find_key(pool, {"outside_temp", "outside_temperature"}))
+        if outside_temperature is None:
+            outside_temperature = analogue_ambient_temperature
         live_pump_speed = _pump_speed(pump_speed)
         return PoolStatus(
             pool_id=self.pool_id, name=pool_name or _find_key(pool, {"name", "pool_name"}), online=True, ph=ph,
@@ -1869,7 +1969,7 @@ class SmartPoolConnectClient:
             eco_valve_regulation=eco_valve_settings.regulation, eco_valve_start_time=eco_valve_settings.start_time, eco_valve_stop_time=eco_valve_settings.stop_time,
             zero_e_enabled=zero_e_settings.enabled, zero_e_enable_threshold=zero_e_settings.threshold_enable, zero_e_disable_threshold=zero_e_settings.threshold_disable, zero_e_target_temperature=zero_e_settings.threshold_temperature, zero_e_valid=zero_e_settings.valid,
             temperature_target=temperature_settings.target, temperature_interval=temperature_settings.interval, temperature_priority=temperature_settings.priority, temperature_pump_speed=temperature_settings.pump_speed, temperature_cooling_period=temperature_settings.cooling_period, temperature_offset_water=temperature_settings.offset_water, temperature_offset_ambient=temperature_settings.offset_ambient, temperature_frost_protection=temperature_settings.frost_protection, temperature_schedule_start_time=temperature_schedule.start_time, temperature_schedule_stop_time=temperature_schedule.stop_time, temperature_schedule_enabled=temperature_schedule.enabled, temperature_schedule_days=temperature_schedule.days, temperature_valid=temperature_settings.valid,
-            water_temperature=water_temperature, water_temperature_target=temperature_settings.target if temperature_settings.target is not None else _as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=standard_cover_state or covco_state, cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, covco_cover_position=covco_position, phnix_setpoint=phnix.get("setpoint"), phnix_inlet_temperature=phnix.get("inlet"), phnix_outlet_temperature=phnix.get("outlet"), phnix_coil_temperature=phnix.get("coil"), phnix_ambient_temperature=phnix.get("ambient"), phnix_mode=phnix.get("mode"), phnix_sub_mode=phnix.get("sub_mode"), phnix_error=phnix.get("error"), phnix_fail_0=phnix.get("fail_0"), capabilities=frozen_capabilities, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
+            water_temperature=water_temperature, water_temperature_target=temperature_settings.target if temperature_settings.target is not None else _as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=outside_temperature, solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=standard_cover_state or covco_state, cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, covco_cover_position=covco_position, phnix_setpoint=phnix.get("setpoint"), phnix_inlet_temperature=phnix.get("inlet"), phnix_outlet_temperature=phnix.get("outlet"), phnix_coil_temperature=phnix.get("coil"), phnix_ambient_temperature=phnix.get("ambient"), phnix_mode=phnix.get("mode"), phnix_sub_mode=phnix.get("sub_mode"), phnix_error=phnix.get("error"), phnix_fail_0=phnix.get("fail_0"), capabilities=frozen_capabilities, raw_live_status=live_status or None, raw_v3_live_status=v3_live or None, raw_pool_status=pool if isinstance(pool, dict) else None)
 
     async def async_set_lighting(self, on: bool) -> None:
         await self.async_set_lighting_settings(always_active=on)
