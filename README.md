@@ -23,7 +23,8 @@ The integration was originally developed for the **EPS Nexus Full Control** syst
 - **Norsup One V3** - Beta
 
 
-SmartPoolConnect installations can expose different APIs, controller modules and capabilities. The integration therefore detects supported functionality dynamically instead of assuming that every pool has the same equipment.
+SmartPoolConnect Owner allows Home Assistant users to monitor and control supported swimming pool equipment through the SmartPoolConnect cloud platform.The integration was originally developed and tested with the EPS Nexus Full Control system and has since been expanded through community testing to additional SmartPoolConnect-compatible systems, including Nexus II and Norsup One V3.
+
 
 > [!IMPORTANT]
 > This project is not affiliated with, endorsed by, or supported by EPS or SmartPoolConnect.
