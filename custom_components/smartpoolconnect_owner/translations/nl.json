@@ -54,27 +54,21 @@
       },
       "temperature_schedule_sunday": {
         "name": "Temperatuurschema zondag"
+      },
+      "lighting": {
+        "name": "Verlichting"
+      },
+      "lighting_cover_disabled": {
+        "name": "Verlichting uit bij gesloten externe afdekking"
+      },
+      "lighting_internal_cover_disabled": {
+        "name": "Verlichting uit bij gesloten interne afdekking"
+      },
+      "lighting_schedule_enabled": {
+        "name": "Verlichtingsschema"
       }
     },
     "number": {
-      "ph_target": {
-        "name": "pH-doelwaarde"
-      },
-      "ph_dosing_time": {
-        "name": "pH-doseertijd"
-      },
-      "ph_pausing_time": {
-        "name": "pH-pauzetijd"
-      },
-      "rx_target": {
-        "name": "Rx-doelwaarde"
-      },
-      "rx_dosing_time": {
-        "name": "Rx-doseertijd"
-      },
-      "rx_pausing_time": {
-        "name": "Rx-pauzetijd"
-      },
       "zero_e_enable_threshold": {
         "name": "Zero-E inschakeldrempel"
       },
