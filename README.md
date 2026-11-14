@@ -21,7 +21,7 @@ The integration was originally developed for the **EPS Nexus Full Control** syst
 - **Nexus Full Control** - Stable
 - **Nexus II Control** - Beta
 - **Norsup One V3** - Beta
-- **Covco cover controllers** - Beta
+
 
 SmartPoolConnect installations can expose different APIs, controller modules and capabilities. The integration therefore detects supported functionality dynamically instead of assuming that every pool has the same equipment.
 
@@ -102,7 +102,7 @@ Supported installations can expose:
 
 ### Cover Control
 
-Depending on the installed cover controller:
+Depending on the installed cover configuration:
 
 - Open cover
 - Close cover
@@ -113,17 +113,12 @@ Depending on the installed cover controller:
 - Automatic pump behaviour during cover movement
 - Optional slow-speed behaviour during cover movement
 
-For compatible **Covco** controllers, SmartPoolConnect Owner supports the native automatic movement controls exposed by the controller.
+Some SmartPoolConnect installations expose their internal cover through
+`covco_data`. SmartPoolConnect itself refers to this as the
+**internal / Covco cover**.
 
-Where encoder telemetry is available, the integration can calculate the actual cover position from the configured open and closed positions.
-
-#### Cover protection
-
-Some Covco installations expose additional motor-protection and baseline-learning functionality.
-
-SmartPoolConnect uses endpoints such as `cover-protect` for motor-power sampling and protection learning. The integration currently does **not** reproduce or modify this learning workflow.
-
-This is intentional to prevent Home Assistant from interfering with the controller's safety/protection behaviour until the complete workflow has been validated.
+Where this telemetry is available, SmartPoolConnect Owner can use it for
+cover state, position and control.
 
 
 ### Heating and Temperature Control
