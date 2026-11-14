@@ -34,6 +34,7 @@ def _lighting_from_data(d: PoolStatus) -> PoolLightingSettings:
     return PoolLightingSettings(
         always_active=d.lighting_always_active if d.lighting_always_active is not None else bool(d.lighting_on),
         cover_disabled=d.lighting_cover_disabled if d.lighting_cover_disabled is not None else False,
+        internal_cover_disabled=d.lighting_internal_cover_disabled if d.lighting_internal_cover_disabled is not None else False,
         schedule_enabled=d.lighting_schedule_enabled if d.lighting_schedule_enabled is not None else False,
         schedule_start_time=d.lighting_schedule_start_time or "20:00",
         schedule_stop_time=d.lighting_schedule_stop_time or "23:59",
@@ -51,6 +52,7 @@ async def _commit_lighting(e, settings: PoolLightingSettings) -> None:
     await e.coordinator.client.async_set_lighting_settings(
         always_active=bool(settings.always_active),
         cover_disabled=bool(settings.cover_disabled),
+        internal_cover_disabled=bool(settings.internal_cover_disabled),
         schedule_enabled=bool(settings.schedule_enabled),
         schedule_start_time=settings.schedule_start_time or "20:00",
         schedule_stop_time=settings.schedule_stop_time or "23:59",
@@ -58,9 +60,11 @@ async def _commit_lighting(e, settings: PoolLightingSettings) -> None:
     )
 
 async def _set_lighting_always(e, v):
-    await e.coordinator.client.async_set_lighting(v)
+    await e.coordinator.client.async_set_lighting_settings(always_active=v)
 async def _set_lighting_cover_disabled(e, v):
     await e.coordinator.client.async_set_lighting_settings(cover_disabled=v)
+async def _set_lighting_internal_cover_disabled(e, v):
+    await e.coordinator.client.async_set_lighting_settings(internal_cover_disabled=v)
 async def _set_lighting_schedule_enabled(e, v):
     await e.coordinator.client.async_set_lighting_settings(schedule_enabled=v)
 def _set_lighting_day(day):
@@ -183,6 +187,7 @@ def _set_temperature_schedule_day(day: str):
 SWITCHES: list[SmartPoolSwitchDescription] = [
     SmartPoolSwitchDescription(key="lighting", translation_key="lighting", icon="mdi:lightbulb", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.lighting_always_active if s.lighting_always_active is not None else s.lighting_on, set_fn=_set_lighting_always),
     SmartPoolSwitchDescription(key="lighting_cover_disabled", translation_key="lighting_cover_disabled", icon="mdi:window-shutter-alert", value_fn=lambda s: s.lighting_cover_disabled, set_fn=_set_lighting_cover_disabled),
+    SmartPoolSwitchDescription(key="lighting_internal_cover_disabled", translation_key="lighting_internal_cover_disabled", icon="mdi:window-shutter-alert", value_fn=lambda s: s.lighting_internal_cover_disabled, set_fn=_set_lighting_internal_cover_disabled),
     SmartPoolSwitchDescription(key="lighting_schedule_enabled", translation_key="lighting_schedule_enabled", icon="mdi:calendar-clock", value_fn=lambda s: s.lighting_schedule_enabled, set_fn=_set_lighting_schedule_enabled),
     SmartPoolSwitchDescription(key="cover_protection", translation_key="cover_protection", icon="mdi:shield-check", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.cover_protection if s.cover_protection is not None else True, set_fn=_set_cover_protection),
     SmartPoolSwitchDescription(key="opening_pump", translation_key="opening_pump", icon="mdi:pump", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.cover_pump_open if s.cover_pump_open is not None else False, set_fn=_set_cover_pump_open),
@@ -200,6 +205,12 @@ COVER_SETTING_KEYS = {
     "closing_pump",
     "opening_pump_slow",
 }
+LIGHTING_SETTING_KEYS = {
+    "lighting",
+    "lighting_cover_disabled",
+    "lighting_internal_cover_disabled",
+    "lighting_schedule_enabled",
+}
 for day in DAYS:
     SWITCHES.append(SmartPoolSwitchDescription(key=f"lighting_schedule_{day}", translation_key=f"lighting_schedule_{day}", icon="mdi:calendar", value_fn=lambda s, d=day: d in s.lighting_schedule_days, set_fn=_set_lighting_day(day)))
     SWITCHES.append(SmartPoolSwitchDescription(key=f"temperature_schedule_{day}", translation_key=f"temperature_schedule_{day}", icon="mdi:calendar", value_fn=lambda s, d=day: d in s.temperature_schedule_days, set_fn=_set_temperature_schedule_day(day)))
@@ -211,7 +222,8 @@ for idx in (1, 2, 3):
 
 NAMES = {
     "lighting": "Lighting Always Active",
-    "lighting_cover_disabled": "Lighting Disabled When Cover Closed",
+    "lighting_cover_disabled": "Lighting Disabled When External Cover Closed",
+    "lighting_internal_cover_disabled": "Lighting Disabled When Internal Cover Closed",
     "lighting_schedule_enabled": "Lighting Schedule",
     "filter_always_active": "Filter Pump",
     "cover_protection": "Cover Protection",
@@ -240,6 +252,7 @@ for day_idx, day in enumerate(DAYS, start=1):
     NAMES[f"temperature_schedule_{day}"] = (
         f"Temperature Schedule Day {day_idx} {day.title()}"
     )
+    LIGHTING_SETTING_KEYS.add(f"lighting_schedule_{day}")
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     capabilities = entry.runtime_data.data.capabilities if entry.runtime_data.data else frozenset()
@@ -249,12 +262,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
         if (
             (description.key != "zero_e_enabled" or "zero_e" in capabilities)
             and (
-                not description.key.startswith("lighting")
-                or (
-                    description.key == "lighting"
-                    and bool({"lighting", "v3_lighting"} & capabilities)
-                )
+                description.key not in LIGHTING_SETTING_KEYS
                 or "lighting" in capabilities
+            )
+            and (
+                description.key != "lighting_internal_cover_disabled"
+                or "lighting_v3" in capabilities
             )
             and (
                 description.key not in COVER_SETTING_KEYS
@@ -272,7 +285,10 @@ class SmartPoolSwitch(SmartPoolConnectEntity, SwitchEntity):
     def __init__(self, coordinator, description: SmartPoolSwitchDescription) -> None:
         super().__init__(coordinator, description.key)
         self.entity_description = description
-        if description.key == "zero_e_enabled" or description.key.startswith("temperature_"):
+        if (
+            description.key == "zero_e_enabled"
+            or description.key.startswith("temperature_")
+        ):
             self._attr_translation_key = None
         self._attr_name = NAMES[description.key]
         self._pending_state = None

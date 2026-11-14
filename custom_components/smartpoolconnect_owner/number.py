@@ -26,7 +26,7 @@ class SmartPoolNumberDescription(NumberEntityDescription):
 
 
 async def _set_ph_target(e, v):
-    await e.coordinator.client.async_set_ph_settings(target=v)
+    await e.coordinator.client.async_set_ph_target(v)
 
 
 async def _set_ph_dosing_time(e, v):
@@ -38,7 +38,7 @@ async def _set_ph_pausing_time(e, v):
 
 
 async def _set_rx_target(e, v):
-    await e.coordinator.client.async_set_rx_settings(target=v)
+    await e.coordinator.client.async_set_rx_target(v)
 
 
 async def _set_rx_dosing_time(e, v):
@@ -142,13 +142,21 @@ NAMES = {
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     capabilities = entry.runtime_data.data.capabilities if entry.runtime_data.data else frozenset()
+    timing_keys = {
+        "ph_dosing_time",
+        "ph_pausing_time",
+        "rx_dosing_time",
+        "rx_pausing_time",
+    }
     async_add_entities(
         SmartPoolNumber(entry.runtime_data, description)
         for description in NUMBERS
         if (
-            (not description.key.startswith("ph_") or "ph" in capabilities)
-            and (not description.key.startswith("rx_") or "rx" in capabilities)
-            and (not description.key.startswith("zero_e_") or "zero_e" in capabilities)
+            (not description.key.startswith("zero_e_") or "zero_e" in capabilities)
+            and not (
+                "dosing_timing_ms" in capabilities
+                and description.key in timing_keys
+            )
             and (
                 not description.key.startswith("temperature_")
                 or "temperature" in capabilities

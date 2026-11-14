@@ -62,13 +62,49 @@ SENSORS = (
         value_fn=lambda s: s.pump_speed,
     ),
     SmartPoolSensorDescription(
+        key="ph_dosing_time_readonly",
+        icon="mdi:timer-outline",
+        native_unit_of_measurement="s",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda s: s.ph_dosing_time,
+        capabilities=("dosing_timing_ms",),
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="ph_pausing_time_readonly",
+        icon="mdi:timer-pause-outline",
+        native_unit_of_measurement="s",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda s: s.ph_pausing_time,
+        capabilities=("dosing_timing_ms",),
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="rx_dosing_time_readonly",
+        icon="mdi:timer-outline",
+        native_unit_of_measurement="s",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda s: s.rx_dosing_time,
+        capabilities=("dosing_timing_ms",),
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="rx_pausing_time_readonly",
+        icon="mdi:timer-pause-outline",
+        native_unit_of_measurement="s",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda s: s.rx_pausing_time,
+        capabilities=("dosing_timing_ms",),
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
         key="cover_state",
         translation_key="cover_state",
         icon="mdi:window-shutter",
         device_class=SensorDeviceClass.ENUM,
         options=["open", "closed", "opening", "closing"],
         value_fn=lambda s: s.cover_state,
-        capabilities=("cover_status", "cover", "covco_cover"),
+        capabilities=("cover_status", "cover", "cover_control", "covco_cover"),
         require_value=True,
     ),
     SmartPoolSensorDescription(
@@ -198,13 +234,17 @@ class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):
     def __init__(self, coordinator, description: SmartPoolSensorDescription) -> None:
         super().__init__(coordinator, description.key)
         self.entity_description = description
-        if description.key.startswith(("covco_", "phnix_")):
+        if description.key.startswith(("covco_", "phnix_")) or description.key.endswith("_readonly"):
             self._attr_translation_key = None
         self._attr_name = {
             "ph": "pH",
             "rx": "Redox (Rx)",
             "water_temperature": "Water Temperature",
             "pump_speed": "Pump Speed",
+            "ph_dosing_time_readonly": "pH Dosing Time",
+            "ph_pausing_time_readonly": "pH Pause Time",
+            "rx_dosing_time_readonly": "Rx Dosing Time",
+            "rx_pausing_time_readonly": "Rx Pause Time",
             "cover_state": "Cover State",
             "covco_cover_position": "Covco Cover Position",
             "phnix_setpoint": "PHNIX Setpoint",

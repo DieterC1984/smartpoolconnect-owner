@@ -54,27 +54,21 @@
       },
       "temperature_schedule_sunday": {
         "name": "Temperature schedule Sunday"
+      },
+      "lighting": {
+        "name": "Lighting"
+      },
+      "lighting_cover_disabled": {
+        "name": "Lighting disabled when external cover is closed"
+      },
+      "lighting_internal_cover_disabled": {
+        "name": "Lighting disabled when internal cover is closed"
+      },
+      "lighting_schedule_enabled": {
+        "name": "Lighting schedule"
       }
     },
     "number": {
-      "ph_target": {
-        "name": "pH target"
-      },
-      "ph_dosing_time": {
-        "name": "pH dosing time"
-      },
-      "ph_pausing_time": {
-        "name": "pH pause time"
-      },
-      "rx_target": {
-        "name": "Rx target"
-      },
-      "rx_dosing_time": {
-        "name": "Rx dosing time"
-      },
-      "rx_pausing_time": {
-        "name": "Rx pause time"
-      },
       "zero_e_enable_threshold": {
         "name": "Zero-E enable threshold"
       },

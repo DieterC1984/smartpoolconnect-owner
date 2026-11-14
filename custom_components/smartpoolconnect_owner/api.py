@@ -29,6 +29,12 @@ PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "maximum"
 BACKWASH_PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "max")
 ECO_VALVE_REGULATION_OPTIONS: tuple[str, ...] = ("off", "always", "buffer_tank")
 
+# v3 ``lighting_config.enabled`` is a bitmask.  Never replace this value with
+# a literal 1/3: bits 2 and 3 preserve cover-dependent behaviour.
+LIGHTING_POWER_BIT = 0b0010
+LIGHTING_EXTERNAL_COVER_BIT = 0b0100
+LIGHTING_INTERNAL_COVER_BIT = 0b1000
+
 
 class SmartPoolConnectError(Exception):
     """Base error for SmartPoolConnect."""
@@ -85,6 +91,7 @@ class PoolStatus:
     lighting_on: bool | None = None
     lighting_always_active: bool | None = None
     lighting_cover_disabled: bool | None = None
+    lighting_internal_cover_disabled: bool | None = None
     lighting_schedule_enabled: bool | None = None
     lighting_schedule_start_time: str | None = None
     lighting_schedule_stop_time: str | None = None
@@ -157,7 +164,6 @@ class PoolStatus:
     phnix_fail_0: int | None = None
     capabilities: frozenset[str] = frozenset()
     raw_live_status: dict[str, Any] | None = None
-    raw_v3_status: dict[str, Any] | None = None
     raw_pool_status: dict[str, Any] | None = None
 
 
@@ -176,6 +182,7 @@ class PoolPhSettings:
     detected: bool = False
     valid: bool = False
     missing_fields: tuple[str, ...] = ()
+    source: str = "legacy"
 
 
 @dataclass(slots=True)
@@ -190,12 +197,14 @@ class PoolRxSettings:
     detected: bool = False
     valid: bool = False
     missing_fields: tuple[str, ...] = ()
+    source: str = "legacy"
 
 
 @dataclass(slots=True)
 class PoolLightingSettings:
     always_active: bool | None = None
     cover_disabled: bool | None = None
+    internal_cover_disabled: bool | None = None
     schedule_enabled: bool | None = None
     schedule_start_time: str | None = None
     schedule_stop_time: str | None = None
@@ -205,6 +214,8 @@ class PoolLightingSettings:
     detected: bool = False
     valid: bool = False
     missing_fields: tuple[str, ...] = ()
+    source: str = "legacy"
+    enabled_mask: int | None = None
 
 
 @dataclass(slots=True)
@@ -345,6 +356,47 @@ def _find_key(obj: Any, names: set[str]) -> Any:
     return None
 
 
+def _find_config_with_keys(obj: Any, keys: set[str]) -> dict[str, Any] | None:
+    """Find a nested configuration object containing one of the given keys."""
+
+    if isinstance(obj, dict):
+        if any(key in obj for key in keys):
+            return obj
+        for value in obj.values():
+            found = _find_config_with_keys(value, keys)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = _find_config_with_keys(value, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def _days_from_mask(value: Any) -> tuple[str, ...] | None:
+    """Decode a Monday-first weekday bitmask."""
+
+    mask = _as_int(value)
+    if mask is None or mask < 0 or mask > 0b1111111:
+        return None
+    return tuple(day for index, day in enumerate(DAYS) if mask & (1 << index))
+
+
+def _days_to_mask(days: tuple[str, ...]) -> int:
+    """Encode weekdays as the controller's Monday-first bitmask."""
+
+    return sum(1 << DAYS.index(day) for day in days if day in DAYS)
+
+
+def _normalise_v3_duration(value: float | None) -> float | None:
+    """Convert a duration from milliseconds to seconds after v3 detection."""
+
+    if value is None:
+        return None
+    return value / 1000
+
+
 def _pump_speed(value: Any) -> str | None:
     if isinstance(value, str):
         return value
@@ -395,8 +447,8 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
     """Return validated Covco presence, position percentage, and endpoint state.
 
     Position is derived only from the encoder endpoints supplied by the
-    controller. Movement is derived from measured motor activity and the
-    wished endpoint, so undocumented state/direction enums are not assumed.
+    controller.  Intermediate ``position_state`` values are intentionally not
+    interpreted until captures for all states are available.
     """
 
     values = _column_values(_find_data_block(data, "covco_data"))
@@ -418,18 +470,7 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
     position = max(0.0, min(100.0, (current_location - close_location) / span * 100.0))
     tolerance = min(hysteresis, abs(span) / 2)
     state = None
-    motor_power = _as_finite_float(values.get("motor_power_w")) or 0.0
-    motor_current = _as_finite_float(values.get("motor_current_a")) or 0.0
-    motor_ccr = _as_finite_float(values.get("ccr_motor")) or 0.0
-    wished_location = _as_finite_float(values.get("wished_location"))
-    motor_active = motor_power > 0.5 or motor_current > 0.05 or motor_ccr > 0
-
-    if motor_active and wished_location is not None:
-        if abs(wished_location - open_location) <= tolerance:
-            state = "opening"
-        elif abs(wished_location - close_location) <= tolerance:
-            state = "closing"
-    elif abs(current_location - open_location) <= tolerance:
+    if abs(current_location - open_location) <= tolerance:
         state = "open"
     elif abs(current_location - close_location) <= tolerance:
         state = "closed"
@@ -461,36 +502,6 @@ def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
         and any(value not in (None, 0, 0.0) for value in temperatures)
     )
     return valid, telemetry if valid else {}
-
-
-def _analogue_telemetry(data: Any) -> dict[str, float | None]:
-    """Return calibrated analogue values exposed by the V3 controller API."""
-
-    values = _column_values(_find_data_block(data, "analoge_data"))
-    return {
-        "ph": _as_finite_float(values.get("ph")),
-        "rx": _as_finite_float(values.get("rx")),
-        "water_temperature": _as_finite_float(values.get("water_t")),
-        "ambient_temperature": _as_finite_float(values.get("ambient_t")),
-    }
-
-
-def _v3_filter_telemetry(data: Any) -> tuple[bool, str | None]:
-    """Return pump running state and speed from a V3 filter block."""
-
-    values = _column_values(_find_data_block(data, "filter_data"))
-    actual = _as_int(values.get("actual"))
-    if actual is None:
-        return False, None
-    return actual != 0, _pump_speed(actual)
-
-
-def _v3_lighting_state(data: Any) -> bool | None:
-    """Return the V3 lighting output state when its block is available."""
-
-    values = _column_values(_find_data_block(data, "lighting_data"))
-    active = _as_int(values.get("active"))
-    return None if active is None else active != 0
 
 
 def _decode_route_response(text: Any) -> Any | None:
@@ -772,6 +783,133 @@ def _extract_devalue_lighting_settings(text: str, pool_id: str | None = None) ->
         dimming=str(config["dimming"]) if _is_present(config.get("dimming")) else None,
         switch_pulse=str(config["switch_pulse"]) if _is_present(config.get("switch_pulse")) else None,
         detected=detected, valid=detected and not missing, missing_fields=tuple(missing),
+    )
+
+
+def _extract_v3_lighting_settings(data: Any) -> PoolLightingSettings:
+    """Extract the v3 admin lighting contract and preserve its bitmask."""
+
+    config = _find_config_with_keys(
+        data,
+        {
+            "enabled",
+            "s1_hour_start",
+            "s1_min_start",
+            "s1_hour_stop",
+            "s1_min_stop",
+            "s1_days",
+        },
+    )
+    if config is None:
+        return PoolLightingSettings(source="v3")
+
+    enabled = _as_int(config.get("enabled"))
+    start_hour = _as_int(config.get("s1_hour_start"))
+    start_minute = _as_int(config.get("s1_min_start"))
+    stop_hour = _as_int(config.get("s1_hour_stop"))
+    stop_minute = _as_int(config.get("s1_min_stop"))
+    days = _days_from_mask(config.get("s1_days"))
+    missing: list[str] = []
+    for key, value in (
+        ("enabled", enabled),
+        ("s1_hour_start", start_hour),
+        ("s1_min_start", start_minute),
+        ("s1_hour_stop", stop_hour),
+        ("s1_min_stop", stop_minute),
+        ("s1_days", days),
+    ):
+        if value is None:
+            missing.append(key)
+    if start_hour is not None and not 0 <= start_hour <= 23:
+        missing.append("s1_hour_start")
+    if stop_hour is not None and not 0 <= stop_hour <= 23:
+        missing.append("s1_hour_stop")
+    if start_minute is not None and not 0 <= start_minute <= 59:
+        missing.append("s1_min_start")
+    if stop_minute is not None and not 0 <= stop_minute <= 59:
+        missing.append("s1_min_stop")
+    missing = sorted(set(missing))
+    valid = not missing
+    return PoolLightingSettings(
+        always_active=bool(enabled & LIGHTING_POWER_BIT) if enabled is not None else None,
+        cover_disabled=(
+            bool(enabled & LIGHTING_EXTERNAL_COVER_BIT)
+            if enabled is not None
+            else None
+        ),
+        internal_cover_disabled=(
+            bool(enabled & LIGHTING_INTERNAL_COVER_BIT)
+            if enabled is not None
+            else None
+        ),
+        schedule_enabled=bool(days) if days is not None else None,
+        schedule_start_time=(
+            f"{start_hour:02d}:{start_minute:02d}"
+            if start_hour is not None and start_minute is not None
+            else None
+        ),
+        schedule_stop_time=(
+            f"{stop_hour:02d}:{stop_minute:02d}"
+            if stop_hour is not None and stop_minute is not None
+            else None
+        ),
+        schedule_days=days or (),
+        detected=True,
+        valid=valid,
+        missing_fields=tuple(missing),
+        source="v3",
+        enabled_mask=enabled,
+    )
+
+
+def _extract_v3_ph_settings(data: Any) -> PoolPhSettings:
+    """Extract the confirmed pH setpoint and optional timing fields."""
+
+    config = _find_config_with_keys(data, {"ph_setpoint"})
+    if config is None or "ph_setpoint" not in config:
+        return PoolPhSettings(source="v3")
+    target = _as_finite_float(config.get("ph_setpoint"))
+    dosing_time = _as_finite_float(config.get("ph_dosing_time"))
+    pausing_time = _as_finite_float(
+        config.get("ph_pausing_time", config.get("ph_pause_time"))
+    )
+    return PoolPhSettings(
+        target=target,
+        dosing_time=dosing_time,
+        pausing_time=pausing_time,
+        detected=True,
+        # Only target writes are proven for v3; never mark the legacy full-form
+        # write contract valid from this partial admin response.
+        valid=False,
+        missing_fields=(),
+        source="v3",
+    )
+
+
+def _extract_v3_rx_settings(data: Any) -> PoolRxSettings:
+    """Extract the confirmed Rx/ORP setpoint and optional timing fields."""
+
+    config = _find_config_with_keys(data, {"cl_setpoint"})
+    if config is None or "cl_setpoint" not in config:
+        return PoolRxSettings(source="v3")
+    target = _as_finite_float(config.get("cl_setpoint"))
+    dosing_time = _as_finite_float(
+        config.get("rx_dosing_time", config.get("cl_dosing_time"))
+    )
+    pausing_time = _as_finite_float(
+        config.get(
+            "rx_pausing_time",
+            config.get("rx_pause_time", config.get("cl_pausing_time")),
+        )
+    )
+    return PoolRxSettings(
+        target=target,
+        dosing_time=dosing_time,
+        pausing_time=pausing_time,
+        detected=True,
+        valid=False,
+        missing_fields=(),
+        source="v3",
     )
 
 
@@ -1112,6 +1250,7 @@ class SmartPoolConnectClient:
         self._pool_route_cached_at: float = 0.0
         self._settings_bundle: tuple[Any, ...] | None = None
         self._settings_bundle_cached_at: float = 0.0
+        self._admin_settings_cache: dict[str, tuple[float, Any]] = {}
         self._last_capabilities: frozenset[str] = frozenset()
 
     async def close(self) -> None:
@@ -1291,28 +1430,11 @@ class SmartPoolConnectClient:
             _LOGGER.exception("Could not dump cookie names")
 
     async def _validate_session(self) -> None:
-        """Validate authentication against either supported live API family."""
-
-        errors: list[SmartPoolConnectError] = []
-        for path in (
+        """Validate authentication without triggering reauthentication."""
+        await self._request_text(
+            "GET",
             f"/api/live-status/{self.pool_id}",
-            f"/api/v3-live/{self.pool_id}",
-        ):
-            try:
-                await self._request_text("GET", path)
-                return
-            except SmartPoolConnectError as err:
-                errors.append(err)
-
-        auth_error = next(
-            (err for err in errors if isinstance(err, AuthenticationError)),
-            None,
         )
-        if auth_error is not None:
-            raise auth_error
-        if errors:
-            raise errors[0]
-        raise SmartPoolConnectError("No supported SmartPoolConnect live API was found")
 
     async def _request_text(self, method: str, path: str, **kwargs: Any) -> str:
         url = f"{self.base_url}{path}"
@@ -1345,78 +1467,39 @@ class SmartPoolConnectClient:
         except json.JSONDecodeError:
             return {"raw": text}
 
-    async def _request_optional_json(
-        self,
-        path: str,
-    ) -> tuple[dict[str, Any] | None, SmartPoolConnectError | None]:
-        """Probe one optional JSON endpoint without forcing reauthentication.
-
-        Some installations return 403 or 404 for the live API family they do
-        not implement. Authentication is therefore considered failed only if
-        neither supported live endpoint succeeds.
-        """
-
-        try:
-            text = await self._request_text("GET", path)
-        except SmartPoolConnectError as err:
-            return None, err
-        if not text:
-            return {}, None
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError as err:
-            return None, SmartPoolConnectError(
-                f"GET {path} returned invalid JSON: {err}"
-            )
-        if not isinstance(decoded, dict):
-            return None, SmartPoolConnectError(
-                f"GET {path} returned a non-object JSON response"
-            )
-        return decoded, None
-
-    async def _get_live_sources(
-        self,
-        *,
-        allow_reauth: bool = True,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Read both equal-status live API families, accepting either one."""
-
-        live, live_error = await self._request_optional_json(
-            f"/api/live-status/{self.pool_id}"
-        )
-        v3, v3_error = await self._request_optional_json(
-            f"/api/v3-live/{self.pool_id}"
-        )
-        if live is not None or v3 is not None:
-            return live, v3
-
-        errors = [err for err in (live_error, v3_error) if err is not None]
-        if allow_reauth and any(isinstance(err, AuthenticationError) for err in errors):
-            _LOGGER.warning(
-                "Both SmartPoolConnect live APIs failed; attempting re-login"
-            )
-            await self.async_login()
-            return await self._get_live_sources(allow_reauth=False)
-
-        auth_error = next(
-            (err for err in errors if isinstance(err, AuthenticationError)),
-            None,
-        )
-        if auth_error is not None:
-            raise auth_error
-        if errors:
-            raise SmartPoolConnectError(
-                "Neither /api/live-status nor /api/v3-live is available: "
-                + "; ".join(str(err) for err in errors)
-            )
-        raise SmartPoolConnectError("No supported SmartPoolConnect live API was found")
-
     def _invalidate_settings_cache(self) -> None:
         self._pool_route_text = None
         self._pool_route_decoded = None
         self._pool_route_cached_at = 0.0
         self._settings_bundle = None
         self._settings_bundle_cached_at = 0.0
+        self._admin_settings_cache.clear()
+
+    async def _get_admin_config(
+        self,
+        name: str,
+        *,
+        force_refresh: bool = False,
+    ) -> Any | None:
+        """Read one optional v3 admin-settings contract with a short cache."""
+
+        now = monotonic()
+        cached = self._admin_settings_cache.get(name)
+        if (
+            not force_refresh
+            and cached is not None
+            and now - cached[0] < SETTINGS_CACHE_INTERVAL
+        ):
+            return cached[1]
+        try:
+            data = await self._request_json(
+                "GET", f"/api/admin-settings/{self.pool_id}/{name}"
+            )
+        except SmartPoolConnectError:
+            _LOGGER.debug("v3 admin settings %s are unavailable", name, exc_info=True)
+            return None
+        self._admin_settings_cache[name] = (now, data)
+        return data
 
     async def _get_pool_route_text(self, *, force_refresh: bool = False) -> str:
         now = monotonic()
@@ -1447,13 +1530,21 @@ class SmartPoolConnectClient:
 
     async def async_get_ph_settings(self, *, force_refresh: bool = False) -> PoolPhSettings:
         try:
-            return _extract_devalue_ph_settings(
+            legacy = _extract_devalue_ph_settings(
                 await self._get_pool_route_decoded(force_refresh=force_refresh),
                 self.pool_id,
             )
+            if legacy.valid:
+                return legacy
         except SmartPoolConnectError:
             _LOGGER.debug("Could not read pH settings from pool route data", exc_info=True)
-            return PoolPhSettings()
+            legacy = PoolPhSettings()
+        v3 = _extract_v3_ph_settings(
+            await self._get_admin_config(
+                "dosing_config", force_refresh=force_refresh
+            )
+        )
+        return v3 if v3.detected else legacy
 
     async def async_set_ph_settings(
         self,
@@ -1489,13 +1580,21 @@ class SmartPoolConnectClient:
 
     async def async_get_rx_settings(self, *, force_refresh: bool = False) -> PoolRxSettings:
         try:
-            return _extract_devalue_rx_settings(
+            legacy = _extract_devalue_rx_settings(
                 await self._get_pool_route_decoded(force_refresh=force_refresh),
                 self.pool_id,
             )
+            if legacy.valid:
+                return legacy
         except SmartPoolConnectError:
             _LOGGER.debug("Could not read Rx settings from pool route data", exc_info=True)
-            return PoolRxSettings()
+            legacy = PoolRxSettings()
+        v3 = _extract_v3_rx_settings(
+            await self._get_admin_config(
+                "dosing_config", force_refresh=force_refresh
+            )
+        )
+        return v3 if v3.detected else legacy
 
     async def async_set_rx_settings(
         self,
@@ -1526,21 +1625,67 @@ class SmartPoolConnectClient:
         )
         self._invalidate_settings_cache()
 
+    async def async_set_ph_target(self, target: float) -> None:
+        """Set pH target through the v3 contract, with legacy fallback."""
+
+        dosing_data = await self._get_admin_config(
+            "dosing_config", force_refresh=True
+        )
+        config = _find_config_with_keys(dosing_data, {"ph_setpoint"})
+        if config is not None and "ph_setpoint" in config:
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/dosing_config",
+                json={"ph_setpoint": target},
+                headers={"Content-Type": "application/json"},
+            )
+            self._invalidate_settings_cache()
+            return
+        await self.async_set_ph_settings(target=target)
+
+    async def async_set_rx_target(self, target: float) -> None:
+        """Set Rx/ORP target through ``cl_setpoint`` on v3 controllers."""
+
+        dosing_data = await self._get_admin_config(
+            "dosing_config", force_refresh=True
+        )
+        config = _find_config_with_keys(dosing_data, {"cl_setpoint"})
+        if config is not None and "cl_setpoint" in config:
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/dosing_config",
+                json={"cl_setpoint": int(round(target))},
+                headers={"Content-Type": "application/json"},
+            )
+            self._invalidate_settings_cache()
+            return
+        await self.async_set_rx_settings(target=target)
+
     async def async_get_lighting_settings(self, *, force_refresh: bool = False) -> PoolLightingSettings:
         try:
-            return _extract_devalue_lighting_settings(
+            legacy = _extract_devalue_lighting_settings(
                 await self._get_pool_route_decoded(force_refresh=force_refresh),
                 self.pool_id,
             )
+            if legacy.valid:
+                return legacy
         except SmartPoolConnectError:
             _LOGGER.debug("Could not read lighting settings from pool route data", exc_info=True)
-            return PoolLightingSettings()
+            legacy = PoolLightingSettings()
+
+        v3 = _extract_v3_lighting_settings(
+            await self._get_admin_config(
+                "lighting_config", force_refresh=force_refresh
+            )
+        )
+        return v3 if v3.detected else legacy
 
     async def async_set_lighting_settings(
         self,
         *,
         always_active: bool | None = None,
         cover_disabled: bool | None = None,
+        internal_cover_disabled: bool | None = None,
         schedule_enabled: bool | None = None,
         schedule_start_time: str | None = None,
         schedule_stop_time: str | None = None,
@@ -1551,6 +1696,56 @@ class SmartPoolConnectClient:
             raise SmartPoolConnectError(
                 "Lighting settings update aborted because the current controller settings could not be read completely"
             )
+
+        if current.source == "v3":
+            if current.enabled_mask is None:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because the current enabled bitmask is unavailable"
+                )
+            enabled = current.enabled_mask
+            for requested, bit in (
+                (always_active, LIGHTING_POWER_BIT),
+                (cover_disabled, LIGHTING_EXTERNAL_COVER_BIT),
+                (internal_cover_disabled, LIGHTING_INTERNAL_COVER_BIT),
+            ):
+                if requested is True:
+                    enabled |= bit
+                elif requested is False:
+                    enabled &= ~bit
+
+            days = current.schedule_days if schedule_days is None else schedule_days
+            if schedule_enabled is False:
+                days = ()
+            elif schedule_enabled is True and not days:
+                raise SmartPoolConnectError(
+                    "Select at least one lighting schedule day before enabling the schedule"
+                )
+            if any(day not in DAYS for day in days):
+                raise SmartPoolConnectError("Lighting schedule contains an invalid weekday")
+
+            start = schedule_start_time or current.schedule_start_time
+            stop = schedule_stop_time or current.schedule_stop_time
+            if _valid_time(start) is None or _valid_time(stop) is None:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because a schedule time is invalid"
+                )
+            start_hour, start_minute = (int(part) for part in start.split(":"))
+            stop_hour, stop_minute = (int(part) for part in stop.split(":"))
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/lighting_config",
+                json={
+                    "enabled": enabled,
+                    "s1_hour_start": start_hour,
+                    "s1_min_start": start_minute,
+                    "s1_days": _days_to_mask(days),
+                    "s1_hour_stop": stop_hour,
+                    "s1_min_stop": stop_minute,
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            self._invalidate_settings_cache()
+            return
 
         await self._request_json(
             "PUT",
@@ -1913,14 +2108,12 @@ class SmartPoolConnectClient:
         return self._settings_bundle
 
     async def async_get_status(self) -> PoolStatus:
-        """Return one normalized status from either or both live API families."""
-
-        live, v3 = await self._get_live_sources()
-        pool, _pool_error = await self._request_optional_json(
-            f"/api/pool-status/{self.pool_id}"
-        )
-        pool = pool or {}
-        pool_name, portal_ph, portal_rx = await self._get_current_from_pool_data()
+        live = await self._request_json("GET", f"/api/live-status/{self.pool_id}")
+        try:
+            pool = await self._request_json("GET", f"/api/pool-status/{self.pool_id}")
+        except SmartPoolConnectError:
+            pool = {}
+        pool_name, ph, rx = await self._get_current_from_pool_data()
         (
             ph_settings,
             rx_settings,
@@ -1932,10 +2125,11 @@ class SmartPoolConnectClient:
             temperature_settings,
             cover_settings,
         ) = await self._get_settings_bundle()
-
         capabilities = {
             name
             for name, settings in (
+                ("ph", ph_settings),
+                ("rx", rx_settings),
                 ("lighting", lighting_settings),
                 ("filter", filter_settings),
                 ("backwash", backwash_settings),
@@ -1943,12 +2137,9 @@ class SmartPoolConnectClient:
             )
             if settings.detected
         }
-        if ph_settings.valid:
-            capabilities.add("ph")
-        if rx_settings.valid:
-            capabilities.add("rx")
-        # Settings entities can write to physical equipment. Expose these
-        # capabilities only after the complete portal contract was validated.
+        # Settings entities can write to physical equipment.  Expose those
+        # capabilities only after the complete, validated portal contract was
+        # read; block presence alone is not sufficient.
         capabilities.update(
             name
             for name, settings in (
@@ -1958,229 +2149,65 @@ class SmartPoolConnectClient:
             )
             if settings.valid
         )
-        if live is not None:
-            capabilities.add("live_status_api")
-        if v3 is not None:
-            capabilities.add("v3_live_api")
-
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
         fs3 = filter_settings.schedule_3 or PoolFilterSchedule()
         temperature_schedule = (
             temperature_settings.schedule or PoolTemperatureSchedule()
         )
-
-        analogue = _analogue_telemetry(v3)
-        standard_cover_state = _cover_state(
-            _find_key(live, {"cover"}) if live is not None else None
-        )
-        covco_valid, covco_position, covco_state = _covco_telemetry(v3)
-        phnix_valid, phnix = _phnix_telemetry(v3)
-        v3_pump_status, v3_pump_speed = _v3_filter_telemetry(v3)
-        v3_lighting = _v3_lighting_state(v3)
-
+        lighting = _find_key(live, {"lighting"})
+        heating_active = _find_key(live, {"_heating_pump_active"})
+        heating = _find_key(live, {"heating", "heating_on"})
+        cover = _find_key(live, {"cover"})
+        pump_status = _find_key(live, {"pump_status"})
+        pump_speed = _find_key(live, {"pump_speed"})
+        standard_cover_state = _cover_state(cover)
+        covco_valid, covco_position, covco_state = _covco_telemetry(live)
+        phnix_valid, phnix = _phnix_telemetry(live)
         if standard_cover_state is not None:
             capabilities.add("cover_status")
         if covco_valid:
             capabilities.add("covco_cover")
+        if cover_settings.valid or covco_valid:
+            capabilities.add("cover_control")
         if phnix_valid:
             capabilities.add("phnix_heat_pump")
-        if _find_data_block(v3, "lighting_data") is not None:
-            capabilities.add("v3_lighting")
-
+        if lighting_settings.source == "v3":
+            capabilities.add("lighting_v3")
+        raw_dosing_durations = (
+            ph_settings.dosing_time,
+            ph_settings.pausing_time,
+            rx_settings.dosing_time,
+            rx_settings.pausing_time,
+        )
+        dosing_timings_ms = any(
+            value is not None and abs(value) >= 1000
+            for value in raw_dosing_durations
+        )
+        if dosing_timings_ms:
+            capabilities.add("dosing_timing_ms")
         frozen_capabilities = frozenset(capabilities)
         self._last_capabilities = frozen_capabilities
-
-        live_ph = _as_float(_find_key(live, {"ph"})) if live is not None else None
-        live_rx = (
-            _as_float(_find_key(live, {"rx", "orp"}))
-            if live is not None
-            else None
-        )
-        ph = portal_ph if portal_ph is not None else live_ph
-        if ph is None:
-            ph = analogue["ph"]
-        rx = portal_rx if portal_rx is not None else live_rx
-        if rx is None:
-            rx = analogue["rx"]
-
-        water_temperature = (
-            _as_float(
-                _find_key(live, {"water_temp", "water_temperature", "temperature"})
-            )
-            if live is not None
-            else None
-        )
+        water_temperature = _as_float(_find_key(live, {"water_temp", "water_temperature", "temperature"}))
         if water_temperature is None:
-            water_temperature = _as_float(
-                _find_key(pool, {"water_temp", "water_temperature", "temperature"})
-            )
-        if water_temperature is None:
-            water_temperature = analogue["water_temperature"]
-
-        live_pump_status = (
-            _find_key(live, {"pump_status"}) if live is not None else None
-        )
-        live_pump_speed = _pump_speed(
-            _find_key(live, {"pump_speed"}) if live is not None else None
-        )
-        pump_status = (
-            bool(live_pump_status)
-            if live_pump_status is not None
-            else v3_pump_status if v3_pump_speed is not None else None
-        )
-        pump_speed = live_pump_speed or v3_pump_speed
-
-        live_lighting = _find_key(live, {"lighting"}) if live is not None else None
-        lighting_on = (
-            lighting_settings.always_active
-            if lighting_settings.always_active is not None
-            else (live_lighting not in (None, -1, 0))
-            if live_lighting is not None
-            else v3_lighting
-        )
-        heating_active = (
-            _find_key(live, {"_heating_pump_active"})
-            if live is not None
-            else None
-        )
-        heating = (
-            _find_key(live, {"heating", "heating_on"})
-            if live is not None
-            else None
-        )
-        heating_on = (
-            bool(heating_active)
-            if heating_active is not None
-            else bool(heating)
-            if heating not in (None, -1)
-            else None
-        )
-        outside_temperature = _as_float(
-            _find_key(pool, {"outside_temp", "outside_temperature"})
-        )
-        if outside_temperature is None:
-            outside_temperature = analogue["ambient_temperature"]
-
+            water_temperature = _as_float(_find_key(pool, {"water_temp", "water_temperature", "temperature"}))
+        live_pump_speed = _pump_speed(pump_speed)
         return PoolStatus(
-            pool_id=self.pool_id,
-            name=pool_name or _find_key(pool, {"name", "pool_name"}),
-            online=True,
-            ph=ph,
-            ph_target=(
-                ph_settings.target
-                if ph_settings.target is not None
-                else _as_float(_find_key(pool, {"ph_target", "target_ph"}))
-            ),
-            ph_dosing_time=ph_settings.dosing_time,
-            ph_pausing_time=ph_settings.pausing_time,
-            rx=rx,
-            rx_target=(
-                rx_settings.target
-                if rx_settings.target is not None
-                else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"}))
-            ),
-            rx_dosing_time=rx_settings.dosing_time,
-            rx_pausing_time=rx_settings.pausing_time,
-            lighting_on=lighting_on,
-            lighting_always_active=lighting_settings.always_active,
-            lighting_cover_disabled=lighting_settings.cover_disabled,
-            lighting_schedule_enabled=lighting_settings.schedule_enabled,
-            lighting_schedule_start_time=lighting_settings.schedule_start_time,
-            lighting_schedule_stop_time=lighting_settings.schedule_stop_time,
-            lighting_schedule_days=lighting_settings.schedule_days,
-            filter_always_active=filter_settings.always_active,
-            filter_pump_speed=filter_settings.pump_speed or pump_speed,
-            filter_schedule_1_enabled=fs1.enabled,
-            filter_schedule_1_pump_speed=fs1.pump_speed,
-            filter_schedule_1_start_time=fs1.start_time,
-            filter_schedule_1_stop_time=fs1.stop_time,
-            filter_schedule_1_days=fs1.days,
-            filter_schedule_2_enabled=fs2.enabled,
-            filter_schedule_2_pump_speed=fs2.pump_speed,
-            filter_schedule_2_start_time=fs2.start_time,
-            filter_schedule_2_stop_time=fs2.stop_time,
-            filter_schedule_2_days=fs2.days,
-            filter_schedule_3_enabled=fs3.enabled,
-            filter_schedule_3_pump_speed=fs3.pump_speed,
-            filter_schedule_3_start_time=fs3.start_time,
-            filter_schedule_3_stop_time=fs3.stop_time,
-            filter_schedule_3_days=fs3.days,
-            backwash_interval=backwash_settings.interval,
-            backwash_rinse_duration=backwash_settings.rinse_duration,
-            backwash_duration=backwash_settings.backwash_duration,
-            backwash_pump_speed=backwash_settings.pump_speed,
-            backwash_start_date=backwash_settings.start_date,
-            backwash_start_time=backwash_settings.start_time,
-            eco_valve_regulation=eco_valve_settings.regulation,
-            eco_valve_start_time=eco_valve_settings.start_time,
-            eco_valve_stop_time=eco_valve_settings.stop_time,
-            zero_e_enabled=zero_e_settings.enabled,
-            zero_e_enable_threshold=zero_e_settings.threshold_enable,
-            zero_e_disable_threshold=zero_e_settings.threshold_disable,
-            zero_e_target_temperature=zero_e_settings.threshold_temperature,
-            zero_e_valid=zero_e_settings.valid,
-            temperature_target=temperature_settings.target,
-            temperature_interval=temperature_settings.interval,
-            temperature_priority=temperature_settings.priority,
-            temperature_pump_speed=temperature_settings.pump_speed,
-            temperature_cooling_period=temperature_settings.cooling_period,
-            temperature_offset_water=temperature_settings.offset_water,
-            temperature_offset_ambient=temperature_settings.offset_ambient,
-            temperature_frost_protection=temperature_settings.frost_protection,
-            temperature_schedule_start_time=temperature_schedule.start_time,
-            temperature_schedule_stop_time=temperature_schedule.stop_time,
-            temperature_schedule_enabled=temperature_schedule.enabled,
-            temperature_schedule_days=temperature_schedule.days,
-            temperature_valid=temperature_settings.valid,
-            water_temperature=water_temperature,
-            water_temperature_target=(
-                temperature_settings.target
-                if temperature_settings.target is not None
-                else _as_float(
-                    _find_key(
-                        pool,
-                        {"water_temperature_target", "temperature_target", "setpoint"},
-                    )
-                )
-            ),
-            outside_temperature=outside_temperature,
-            solar_temperature=_as_float(
-                _find_key(pool, {"solar_temp", "solar_temperature"})
-            ),
-            pump_speed=pump_speed,
-            pump_status=pump_status,
-            heating_on=heating_on,
-            cover_state=standard_cover_state or covco_state,
-            cover_protection=cover_settings.protection,
-            cover_pump_open=cover_settings.pump_open,
-            cover_pump_close=cover_settings.pump_close,
-            cover_pump_low_speed=cover_settings.pump_low_speed,
-            covco_cover_position=covco_position,
-            phnix_setpoint=phnix.get("setpoint"),
-            phnix_inlet_temperature=phnix.get("inlet"),
-            phnix_outlet_temperature=phnix.get("outlet"),
-            phnix_coil_temperature=phnix.get("coil"),
-            phnix_ambient_temperature=phnix.get("ambient"),
-            phnix_mode=phnix.get("mode"),
-            phnix_sub_mode=phnix.get("sub_mode"),
-            phnix_error=phnix.get("error"),
-            phnix_fail_0=phnix.get("fail_0"),
-            capabilities=frozen_capabilities,
-            raw_live_status=live,
-            raw_v3_status=v3,
-            raw_pool_status=pool,
-        )
+            pool_id=self.pool_id, name=pool_name or _find_key(pool, {"name", "pool_name"}), online=True, ph=ph,
+            ph_target=ph_settings.target if ph_settings.target is not None else _as_float(_find_key(pool, {"ph_target", "target_ph"})), ph_dosing_time=_normalise_v3_duration(ph_settings.dosing_time) if dosing_timings_ms else ph_settings.dosing_time, ph_pausing_time=_normalise_v3_duration(ph_settings.pausing_time) if dosing_timings_ms else ph_settings.pausing_time,
+            rx=rx, rx_target=rx_settings.target if rx_settings.target is not None else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"})), rx_dosing_time=_normalise_v3_duration(rx_settings.dosing_time) if dosing_timings_ms else rx_settings.dosing_time, rx_pausing_time=_normalise_v3_duration(rx_settings.pausing_time) if dosing_timings_ms else rx_settings.pausing_time,
+            lighting_on=lighting_settings.always_active if lighting_settings.always_active is not None else (lighting not in (None, -1, 0)), lighting_always_active=lighting_settings.always_active, lighting_cover_disabled=lighting_settings.cover_disabled, lighting_internal_cover_disabled=lighting_settings.internal_cover_disabled, lighting_schedule_enabled=lighting_settings.schedule_enabled, lighting_schedule_start_time=lighting_settings.schedule_start_time, lighting_schedule_stop_time=lighting_settings.schedule_stop_time, lighting_schedule_days=lighting_settings.schedule_days,
+            filter_always_active=filter_settings.always_active, filter_pump_speed=filter_settings.pump_speed or live_pump_speed,
+            filter_schedule_1_enabled=fs1.enabled, filter_schedule_1_pump_speed=fs1.pump_speed, filter_schedule_1_start_time=fs1.start_time, filter_schedule_1_stop_time=fs1.stop_time, filter_schedule_1_days=fs1.days,
+            filter_schedule_2_enabled=fs2.enabled, filter_schedule_2_pump_speed=fs2.pump_speed, filter_schedule_2_start_time=fs2.start_time, filter_schedule_2_stop_time=fs2.stop_time, filter_schedule_2_days=fs2.days,
+            filter_schedule_3_enabled=fs3.enabled, filter_schedule_3_pump_speed=fs3.pump_speed, filter_schedule_3_start_time=fs3.start_time, filter_schedule_3_stop_time=fs3.stop_time, filter_schedule_3_days=fs3.days,
+            backwash_interval=backwash_settings.interval, backwash_rinse_duration=backwash_settings.rinse_duration, backwash_duration=backwash_settings.backwash_duration, backwash_pump_speed=backwash_settings.pump_speed, backwash_start_date=backwash_settings.start_date, backwash_start_time=backwash_settings.start_time,
+            eco_valve_regulation=eco_valve_settings.regulation, eco_valve_start_time=eco_valve_settings.start_time, eco_valve_stop_time=eco_valve_settings.stop_time,
+            zero_e_enabled=zero_e_settings.enabled, zero_e_enable_threshold=zero_e_settings.threshold_enable, zero_e_disable_threshold=zero_e_settings.threshold_disable, zero_e_target_temperature=zero_e_settings.threshold_temperature, zero_e_valid=zero_e_settings.valid,
+            temperature_target=temperature_settings.target, temperature_interval=temperature_settings.interval, temperature_priority=temperature_settings.priority, temperature_pump_speed=temperature_settings.pump_speed, temperature_cooling_period=temperature_settings.cooling_period, temperature_offset_water=temperature_settings.offset_water, temperature_offset_ambient=temperature_settings.offset_ambient, temperature_frost_protection=temperature_settings.frost_protection, temperature_schedule_start_time=temperature_schedule.start_time, temperature_schedule_stop_time=temperature_schedule.stop_time, temperature_schedule_enabled=temperature_schedule.enabled, temperature_schedule_days=temperature_schedule.days, temperature_valid=temperature_settings.valid,
+            water_temperature=water_temperature, water_temperature_target=temperature_settings.target if temperature_settings.target is not None else _as_float(_find_key(pool, {"water_temperature_target", "temperature_target", "setpoint"})), outside_temperature=_as_float(_find_key(pool, {"outside_temp", "outside_temperature"})), solar_temperature=_as_float(_find_key(pool, {"solar_temp", "solar_temperature"})), pump_speed=live_pump_speed, pump_status=bool(pump_status) if pump_status is not None else None, heating_on=(bool(heating_active) if heating_active is not None else (bool(heating) if heating not in (None, -1) else None)), cover_state=standard_cover_state or covco_state, cover_protection=cover_settings.protection, cover_pump_open=cover_settings.pump_open, cover_pump_close=cover_settings.pump_close, cover_pump_low_speed=cover_settings.pump_low_speed, covco_cover_position=covco_position, phnix_setpoint=phnix.get("setpoint"), phnix_inlet_temperature=phnix.get("inlet"), phnix_outlet_temperature=phnix.get("outlet"), phnix_coil_temperature=phnix.get("coil"), phnix_ambient_temperature=phnix.get("ambient"), phnix_mode=phnix.get("mode"), phnix_sub_mode=phnix.get("sub_mode"), phnix_error=phnix.get("error"), phnix_fail_0=phnix.get("fail_0"), capabilities=frozen_capabilities, raw_live_status=live if isinstance(live, dict) else None, raw_pool_status=pool if isinstance(pool, dict) else None)
 
     async def async_set_lighting(self, on: bool) -> None:
-        if "v3_lighting" in self._last_capabilities:
-            await self._request_json(
-                "PATCH",
-                f"/api/admin-settings/{self.pool_id}/lighting_config",
-                json={"enabled": 3 if on else 1},
-                headers={"Content-Type": "application/json"},
-            )
-            return
         await self.async_set_lighting_settings(always_active=on)
 
     async def async_set_pump_speed(self, speed: str) -> None:
@@ -2191,45 +2218,21 @@ class SmartPoolConnectClient:
         await self.async_set_filter_settings(filter_settings)
 
     async def async_cover_open(self) -> None:
-        if "covco_cover" in self._last_capabilities:
-            await self._request_json(
-                "PATCH",
-                f"/api/admin-settings/{self.pool_id}/covco_data",
-                json={"automatic_movement_open": True},
-                headers={"Content-Type": "application/json"},
-            )
-            return
-        if "cover" not in self._last_capabilities:
+        if "cover_control" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
             )
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_open", headers={"Content-Type": "application/json"})
 
     async def async_cover_close(self) -> None:
-        if "covco_cover" in self._last_capabilities:
-            await self._request_json(
-                "PATCH",
-                f"/api/admin-settings/{self.pool_id}/covco_data",
-                json={"automatic_movement_close": True},
-                headers={"Content-Type": "application/json"},
-            )
-            return
-        if "cover" not in self._last_capabilities:
+        if "cover_control" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
             )
         await self._request_json("POST", f"/api/cmd/{self.pool_id}/cover_close", headers={"Content-Type": "application/json"})
 
     async def async_cover_stop(self) -> None:
-        if "covco_cover" in self._last_capabilities:
-            await self._request_json(
-                "PATCH",
-                f"/api/admin-settings/{self.pool_id}/covco_data",
-                json={"automatic_movement_stop": True},
-                headers={"Content-Type": "application/json"},
-            )
-            return
-        if "cover" not in self._last_capabilities:
+        if "cover_control" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
             )
