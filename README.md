@@ -12,10 +12,9 @@ Support is completely optional. The integration and all its features remain free
 
 Unofficial Home Assistant integration for SmartPoolConnect owner portals.
 
-SmartPoolConnect Owner allows Home Assistant users to monitor and control supported swimming pool equipment through the SmartPoolConnect cloud platform.The integration was originally developed and tested with the EPS Nexus Full Control system and has since been expanded through community testing to additional SmartPoolConnect-compatible systems, including Nexus II and Norsup One V3.
+SmartPoolConnect Owner allows Home Assistant users to monitor and control supported swimming pool equipment through the SmartPoolConnect cloud platform.
+The integration was originally developed and tested with the EPS Nexus Full Control system and has since been expanded through community testing to additional SmartPoolConnect-compatible systems, including Nexus II and Norsup One V3.
 
-
-The integration was originally developed for the **EPS Nexus Full Control** system and has since been expanded to support additional SmartPoolConnect controller generations and pool configurations.
 
 ## Supported platforms
 
