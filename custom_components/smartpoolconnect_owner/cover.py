@@ -61,6 +61,13 @@ class PoolCover(SmartPoolConnectEntity, CoverEntity):
     def is_closing(self) -> bool:
         return self.coordinator.data.cover_state == "closing"
 
+    @property
+    def current_cover_position(self) -> int | None:
+        """Return the validated Covco encoder position when available."""
+
+        position = self.coordinator.data.covco_cover_position
+        return round(position) if position is not None else None
+
     async def async_open_cover(self, **kwargs: Any) -> None:
         await self.coordinator.client.async_cover_open()
         await self.coordinator.async_request_refresh()

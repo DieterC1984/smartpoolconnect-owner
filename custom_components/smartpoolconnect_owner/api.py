@@ -477,6 +477,18 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
     return True, round(position, 1), state
 
 
+def _covco_telemetry_with_fallback(
+    live: Any,
+    pool_route: Any,
+) -> tuple[bool, float | None, str | None]:
+    """Prefer current live Covco telemetry and fall back to the cover route."""
+
+    telemetry = _covco_telemetry(live)
+    if telemetry[0] or pool_route is None:
+        return telemetry
+    return _covco_telemetry(pool_route)
+
+
 def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
     """Return PHNIX telemetry only when the block contains real measurements."""
 
@@ -2125,6 +2137,20 @@ class SmartPoolConnectClient:
             temperature_settings,
             cover_settings,
         ) = await self._get_settings_bundle()
+        # Some v3 installations do not include Covco telemetry in
+        # ``/api/live-status``.  The cover page does expose the same validated
+        # ``covco_data`` columns in its Remix route response, which is already
+        # cached while reading the settings bundle.  Keep the live endpoint as
+        # the preferred source and use the route only when that block is absent
+        # or incomplete.
+        try:
+            pool_route = await self._get_pool_route_decoded()
+        except SmartPoolConnectError:
+            _LOGGER.debug(
+                "Could not read v3 Covco telemetry from pool route data",
+                exc_info=True,
+            )
+            pool_route = None
         capabilities = {
             name
             for name, settings in (
@@ -2162,7 +2188,10 @@ class SmartPoolConnectClient:
         pump_status = _find_key(live, {"pump_status"})
         pump_speed = _find_key(live, {"pump_speed"})
         standard_cover_state = _cover_state(cover)
-        covco_valid, covco_position, covco_state = _covco_telemetry(live)
+        covco_valid, covco_position, covco_state = _covco_telemetry_with_fallback(
+            live,
+            pool_route,
+        )
         phnix_valid, phnix = _phnix_telemetry(live)
         if standard_cover_state is not None:
             capabilities.add("cover_status")
