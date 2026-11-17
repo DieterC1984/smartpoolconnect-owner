@@ -14,11 +14,13 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SmartPoolConnectConfigEntry
 from .api import PoolStatus
+from .const import CONF_POOL_ID, DOMAIN
 from .entity import SmartPoolConnectEntity
 
 
@@ -267,6 +269,29 @@ def _is_supported(
     return not description.require_value or description.value_fn(status) is not None
 
 
+def _repair_legacy_firmware_names(
+    hass: HomeAssistant,
+    entry: SmartPoolConnectConfigEntry,
+) -> None:
+    """Clear only the known legacy pool-name overrides for GUI and MAIN."""
+
+    status = entry.runtime_data.data
+    if status is None or not status.name:
+        return
+
+    pool_id = entry.data[CONF_POOL_ID]
+    entity_registry = er.async_get(hass)
+    for key in ("gui_version", "main_version"):
+        entity_id = entity_registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{pool_id}_{key}"
+        )
+        if entity_id is None:
+            continue
+        registry_entry = entity_registry.async_get(entity_id)
+        if registry_entry is not None and registry_entry.name == status.name:
+            entity_registry.async_update_entity(entity_id, name=None)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: SmartPoolConnectConfigEntry,
@@ -274,6 +299,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up SmartPool sensors."""
 
+    _repair_legacy_firmware_names(hass, entry)
     async_add_entities(
         SmartPoolSensor(entry.runtime_data, description)
         for description in SENSORS
