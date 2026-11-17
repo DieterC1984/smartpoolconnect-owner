@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -13,6 +14,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SmartPoolConnectConfigEntry
@@ -24,7 +26,7 @@ from .entity import SmartPoolConnectEntity
 class SmartPoolSensorDescription(SensorEntityDescription):
     """SmartPool sensor description."""
 
-    value_fn: Callable[[PoolStatus], float | int | str | None]
+    value_fn: Callable[[PoolStatus], Any]
     capabilities: tuple[str, ...] = ()
     require_value: bool = False
 
@@ -194,6 +196,59 @@ SENSORS = (
         capabilities=("phnix_heat_pump",),
         require_value=True,
     ),
+    SmartPoolSensorDescription(
+        key="pool_name",
+        icon="mdi:pool",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.name,
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="mac_address",
+        icon="mdi:network-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.mac_address,
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="pool_id",
+        icon="mdi:identifier",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.pool_id,
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="gui_version",
+        icon="mdi:chip",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda s: s.gui_version,
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="main_version",
+        icon="mdi:chip",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda s: s.main_version,
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="io_version",
+        icon="mdi:chip",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda s: s.io_version,
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="deck_version",
+        icon="mdi:chip",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda s: s.deck_version,
+        require_value=True,
+    ),
 )
 
 
@@ -256,6 +311,13 @@ class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):
             "phnix_sub_mode": "PHNIX Sub-mode",
             "phnix_error": "PHNIX Error Code",
             "phnix_fail_0": "PHNIX Failure Register 0",
+            "pool_name": "Name",
+            "mac_address": "MAC Address",
+            "pool_id": "Pool ID",
+            "gui_version": "GUI Version",
+            "main_version": "MAIN Version",
+            "io_version": "IO Version",
+            "deck_version": "DECK Version",
         }[description.key]
 
     @property

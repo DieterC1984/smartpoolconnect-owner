@@ -162,6 +162,11 @@ class PoolStatus:
     phnix_sub_mode: int | None = None
     phnix_error: int | None = None
     phnix_fail_0: int | None = None
+    gui_version: str | None = None
+    main_version: str | None = None
+    io_version: str | None = None
+    deck_version: str | None = None
+    mac_address: str | None = None
     capabilities: frozenset[str] = frozenset()
     raw_live_status: dict[str, Any] | None = None
     raw_v3_status: dict[str, Any] | None = None
@@ -448,8 +453,8 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
     """Return validated Covco presence, position percentage, and endpoint state.
 
     Position is derived only from the encoder endpoints supplied by the
-    controller. Movement is derived from measured motor activity and the
-    wished endpoint; undocumented ``position_state`` enums are not used.
+    controller.  Intermediate ``position_state`` values are intentionally not
+    interpreted until captures for all states are available.
     """
 
     values = _column_values(_find_data_block(data, "covco_data"))
@@ -471,18 +476,7 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
     position = max(0.0, min(100.0, (current_location - close_location) / span * 100.0))
     tolerance = min(hysteresis, abs(span) / 2)
     state = None
-    motor_power = _as_finite_float(values.get("motor_power_w")) or 0.0
-    motor_current = _as_finite_float(values.get("motor_current_a")) or 0.0
-    motor_ccr = _as_finite_float(values.get("ccr_motor")) or 0.0
-    wished_location = _as_finite_float(values.get("wished_location"))
-    motor_active = motor_power > 0.5 or motor_current > 0.05 or motor_ccr > 0
-
-    if motor_active and wished_location is not None:
-        if abs(wished_location - open_location) <= tolerance:
-            state = "opening"
-        elif abs(wished_location - close_location) <= tolerance:
-            state = "closing"
-    elif abs(current_location - open_location) <= tolerance:
+    if abs(current_location - open_location) <= tolerance:
         state = "open"
     elif abs(current_location - close_location) <= tolerance:
         state = "closed"
@@ -494,17 +488,9 @@ def _covco_telemetry_with_fallback(
     v3: Any,
     pool_route: Any,
 ) -> tuple[bool, float | None, str | None]:
-    """Read Covco telemetry from all confirmed sources in stable order.
-
-    The original live-status response remains preferred for existing pools.
-    V3 controllers expose the live encoder block through ``/api/v3-live``.
-    The decoded pool route remains a final fallback for installations where
-    the controller's live block is temporarily absent or incomplete.
-    """
+    """Read Covco telemetry from all confirmed sources in priority order."""
 
     for source in (live, v3, pool_route):
-        if source is None:
-            continue
         telemetry = _covco_telemetry(source)
         if telemetry[0]:
             return telemetry
@@ -551,62 +537,41 @@ def _analogue_telemetry(data: Any) -> dict[str, float | None]:
 
 
 def _v3_filter_telemetry(data: Any) -> tuple[bool | None, str | None]:
-    """Return V3 pump state and only confirmed Norsup speed mappings.
+    """Return pump state and only the confirmed V3 speed mappings.
 
-    Norsup One V3 exposes discrete ``speed_2`` and ``speed_3`` outputs.  Field
-    confirmation maps those outputs to low and medium respectively.  No speed
-    is inferred from similarly named minimum/high/maximum outputs or from the
-    controller's undocumented numeric ``actual`` value.
+    ``filter_data.actual`` is used when available. Norsup V3 captures confirm
+    that ``gpio_o_data.speed_2`` means Low and ``speed_3`` means Medium. The
+    unconfirmed speed_1 and speed_4 outputs are deliberately not guessed.
     """
 
     values = _column_values(_find_data_block(data, "filter_data"))
-    if not values:
-        return None, None
-
-    def binary_output(value: Any) -> bool | None:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)) and value in (0, 1):
-            return bool(value)
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in ("true", "1", "on"):
-                return True
-            if normalized in ("false", "0", "off"):
-                return False
-        return None
-
-    speed_2 = binary_output(values.get("speed_2"))
-    speed_3 = binary_output(values.get("speed_3"))
-    confirmed_active = tuple(
-        speed
-        for speed, active in (("low", speed_2), ("medium", speed_3))
-        if active is True
-    )
-    speed = confirmed_active[0] if len(confirmed_active) == 1 else None
-
     actual = _as_int(values.get("actual"))
-    active = binary_output(values.get("active"))
-    status = binary_output(values.get("status"))
     if actual is not None:
-        running: bool | None = actual != 0
-    elif active is not None:
-        running = active
-    elif status is not None:
-        running = status
-    elif speed_2 is not None or speed_3 is not None:
-        running = bool(speed_2 or speed_3)
-    else:
-        running = None
-    return running, speed
+        return actual != 0, _pump_speed(actual)
+
+    gpio = _column_values(_find_data_block(data, "gpio_o_data"))
+    pump = gpio.get("pump")
+    if not isinstance(pump, bool):
+        return None, None
+    if not pump:
+        return False, "off"
+    if gpio.get("speed_2") is True:
+        return True, "low"
+    if gpio.get("speed_3") is True:
+        return True, "medium"
+    return True, None
 
 
 def _v3_lighting_state(data: Any) -> bool | None:
-    """Return the V3 lighting output state when its block is available."""
+    """Return the V3 lighting output state when available."""
 
     values = _column_values(_find_data_block(data, "lighting_data"))
     active = _as_int(values.get("active"))
-    return None if active is None else active != 0
+    if active is not None:
+        return active != 0
+    gpio = _column_values(_find_data_block(data, "gpio_o_data"))
+    light = gpio.get("light")
+    return light if isinstance(light, bool) else None
 
 
 def _decode_route_response(text: Any) -> Any | None:
@@ -796,6 +761,60 @@ def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None
     ph = _metric_actual(pool.get("ph"))
     rx = _sanitize_rx(_metric_actual(pool.get("cl")))
     return name, round(ph, 2) if ph is not None else None, round(rx, 0) if rx is not None else None
+
+
+def _normalize_mac_address(value: Any) -> str | None:
+    """Return a canonical MAC address when the portal exposes one."""
+
+    if not isinstance(value, str):
+        return None
+    compact = re.sub(r"[^0-9A-Fa-f]", "", value)
+    if len(compact) != 12:
+        return None
+    return ":".join(compact[index : index + 2] for index in range(0, 12, 2)).upper()
+
+
+def _extract_system_details(decoded: Any, pool_id: str) -> dict[str, Any]:
+    """Extract requested controller details from semantic route fields."""
+
+    pool = _find_pool_record(decoded, pool_id)
+    firmware = pool.get("firmware") if isinstance(pool, dict) else None
+    firmware = firmware if isinstance(firmware, dict) else {}
+
+    mac_address = None
+    if isinstance(pool, dict):
+        sources = [pool]
+        sources.extend(
+            value
+            for key in ("controller", "gateway", "device", "hardware")
+            if isinstance((value := pool.get(key)), dict)
+        )
+        sources.append(firmware)
+        for source in sources:
+            for key in (
+                "mac_address",
+                "mac",
+                "macAddress",
+                "controller_mac",
+                "controllerMac",
+            ):
+                mac_address = _normalize_mac_address(source.get(key))
+                if mac_address is not None:
+                    break
+            if mac_address is not None:
+                break
+
+    def version(key: str) -> str | None:
+        value = firmware.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    return {
+        "mac_address": mac_address,
+        "gui_version": version("gui_version"),
+        "main_version": version("main_version"),
+        "io_version": version("io_version"),
+        "deck_version": version("deck_version"),
+    }
 
 
 def _extract_devalue_ph_settings(text: str, pool_id: str | None = None) -> PoolPhSettings:
@@ -1593,12 +1612,7 @@ class SmartPoolConnectClient:
         self,
         path: str,
     ) -> tuple[dict[str, Any] | None, SmartPoolConnectError | None]:
-        """Probe one optional JSON endpoint without forcing reauthentication.
-
-        A controller family may return 403 or 404 for the live endpoint it does
-        not implement.  Authentication is therefore considered failed only if
-        neither supported live endpoint succeeds.
-        """
+        """Probe one optional JSON endpoint without treating absence as fatal."""
 
         try:
             text = await self._request_text("GET", path)
@@ -1623,7 +1637,7 @@ class SmartPoolConnectClient:
         *,
         allow_reauth: bool = True,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Read both live API families, always probing live-status first."""
+        """Read both live API families while accepting either one by itself."""
 
         live, live_error = await self._request_optional_json(
             f"/api/live-status/{self.pool_id}"
@@ -2296,11 +2310,13 @@ class SmartPoolConnectClient:
         return self._settings_bundle
 
     async def async_get_status(self) -> PoolStatus:
+        """Return one normalized status from either or both live API families."""
+
         live, v3 = await self._get_live_sources()
-        try:
-            pool = await self._request_json("GET", f"/api/pool-status/{self.pool_id}")
-        except SmartPoolConnectError:
-            pool = {}
+        pool, _pool_error = await self._request_optional_json(
+            f"/api/pool-status/{self.pool_id}"
+        )
+        pool = pool or {}
         pool_name, portal_ph, portal_rx = await self._get_current_from_pool_data()
         (
             ph_settings,
@@ -2314,17 +2330,15 @@ class SmartPoolConnectClient:
             cover_settings,
         ) = await self._get_settings_bundle()
 
-        # Beta 9 added a decoded cover-route fallback. Keep that fallback while
-        # restoring the actual /api/v3-live source used by Nexus II V3 and
-        # Norsup One V3 controllers.
+        # The decoded pool route is also the generic source for firmware
+        # diagnostics and the final Covco fallback. It is cached with the other
+        # settings reads, so this does not add a request to each polling cycle.
         try:
             pool_route = await self._get_pool_route_decoded()
         except SmartPoolConnectError:
-            _LOGGER.debug(
-                "Could not read V3 Covco telemetry from pool route data",
-                exc_info=True,
-            )
+            _LOGGER.debug("Could not read pool route diagnostics", exc_info=True)
             pool_route = None
+        system_details = _extract_system_details(pool_route, self.pool_id)
 
         capabilities = {
             name
@@ -2338,6 +2352,8 @@ class SmartPoolConnectClient:
             )
             if settings.detected
         }
+        # Settings entities can write to physical equipment. Expose those
+        # capabilities only after the complete portal contract was validated.
         capabilities.update(
             name
             for name, settings in (
@@ -2361,11 +2377,7 @@ class SmartPoolConnectClient:
 
         analogue = _analogue_telemetry(v3)
         standard_cover_state = _cover_state(
-            _find_key(live, {"cover"})
-            if live is not None
-            else _find_key(v3, {"cover"})
-            if v3 is not None
-            else None
+            _find_key(live, {"cover"}) if live is not None else None
         )
         covco_valid, covco_position, covco_state = _covco_telemetry_with_fallback(
             live,
@@ -2373,22 +2385,23 @@ class SmartPoolConnectClient:
             pool_route,
         )
         phnix_valid, phnix = _phnix_telemetry(v3)
+        if not phnix_valid:
+            phnix_valid, phnix = _phnix_telemetry(live)
         v3_pump_status, v3_pump_speed = _v3_filter_telemetry(v3)
         v3_lighting = _v3_lighting_state(v3)
 
         if standard_cover_state is not None:
             capabilities.add("cover_status")
         if covco_valid:
-            capabilities.update(("covco_cover", "cover_status"))
+            capabilities.add("covco_cover")
         if cover_settings.valid or covco_valid:
             capabilities.add("cover_control")
         if phnix_valid:
             capabilities.add("phnix_heat_pump")
-        if (
-            lighting_settings.source == "v3"
-            or _find_data_block(v3, "lighting_data") is not None
-        ):
+        if lighting_settings.source == "v3":
             capabilities.add("lighting_v3")
+        if _find_data_block(v3, "lighting_data") is not None:
+            capabilities.add("v3_lighting")
 
         raw_dosing_durations = (
             ph_settings.dosing_time,
@@ -2403,9 +2416,10 @@ class SmartPoolConnectClient:
         if dosing_timings_ms:
             capabilities.add("dosing_timing_ms")
 
-        live_ph = (
-            _as_float(_find_key(live, {"ph"})) if live is not None else None
-        )
+        frozen_capabilities = frozenset(capabilities)
+        self._last_capabilities = frozen_capabilities
+
+        live_ph = _as_float(_find_key(live, {"ph"})) if live is not None else None
         live_rx = (
             _as_float(_find_key(live, {"rx", "orp"}))
             if live is not None
@@ -2432,15 +2446,15 @@ class SmartPoolConnectClient:
         if water_temperature is None:
             water_temperature = analogue["water_temperature"]
 
-        live_pump_status_value = (
+        live_pump_status = (
             _find_key(live, {"pump_status"}) if live is not None else None
         )
         live_pump_speed = _pump_speed(
             _find_key(live, {"pump_speed"}) if live is not None else None
         )
         pump_status = (
-            _as_bool(live_pump_status_value)
-            if live_pump_status_value is not None
+            bool(live_pump_status)
+            if live_pump_status is not None
             else v3_pump_status
         )
         pump_speed = live_pump_speed or v3_pump_speed
@@ -2476,11 +2490,10 @@ class SmartPoolConnectClient:
         if outside_temperature is None:
             outside_temperature = analogue["ambient_temperature"]
 
-        frozen_capabilities = frozenset(capabilities)
-        self._last_capabilities = frozen_capabilities
         return PoolStatus(
             pool_id=self.pool_id,
             name=pool_name or _find_key(pool, {"name", "pool_name"}),
+            mac_address=system_details["mac_address"],
             online=True,
             ph=ph,
             ph_target=(
@@ -2502,7 +2515,9 @@ class SmartPoolConnectClient:
             rx_target=(
                 rx_settings.target
                 if rx_settings.target is not None
-                else _as_float(_find_key(pool, {"rx_target", "target_rx", "orp_target"}))
+                else _as_float(
+                    _find_key(pool, {"rx_target", "target_rx", "orp_target"})
+                )
             ),
             rx_dosing_time=(
                 _normalise_v3_duration(rx_settings.dosing_time)
@@ -2573,7 +2588,11 @@ class SmartPoolConnectClient:
                 else _as_float(
                     _find_key(
                         pool,
-                        {"water_temperature_target", "temperature_target", "setpoint"},
+                        {
+                            "water_temperature_target",
+                            "temperature_target",
+                            "setpoint",
+                        },
                     )
                 )
             ),
@@ -2599,10 +2618,14 @@ class SmartPoolConnectClient:
             phnix_sub_mode=phnix.get("sub_mode"),
             phnix_error=phnix.get("error"),
             phnix_fail_0=phnix.get("fail_0"),
+            gui_version=system_details["gui_version"],
+            main_version=system_details["main_version"],
+            io_version=system_details["io_version"],
+            deck_version=system_details["deck_version"],
             capabilities=frozen_capabilities,
             raw_live_status=live,
             raw_v3_status=v3,
-            raw_pool_status=pool if isinstance(pool, dict) else None,
+            raw_pool_status=pool,
         )
 
     async def async_set_lighting(self, on: bool) -> None:
@@ -2624,7 +2647,7 @@ class SmartPoolConnectClient:
                 headers={"Content-Type": "application/json"},
             )
             return
-        if "cover_control" not in self._last_capabilities:
+        if "cover" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
             )
@@ -2639,7 +2662,7 @@ class SmartPoolConnectClient:
                 headers={"Content-Type": "application/json"},
             )
             return
-        if "cover_control" not in self._last_capabilities:
+        if "cover" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
             )
@@ -2654,7 +2677,7 @@ class SmartPoolConnectClient:
                 headers={"Content-Type": "application/json"},
             )
             return
-        if "cover_control" not in self._last_capabilities:
+        if "cover" not in self._last_capabilities:
             raise SmartPoolConnectError(
                 "Cover control is unavailable because no validated control contract was detected"
             )
