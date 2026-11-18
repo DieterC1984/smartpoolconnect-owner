@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import logging
 import math
@@ -28,6 +29,10 @@ DAYS: tuple[str, ...] = ("monday", "tuesday", "wednesday", "thursday", "friday",
 PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "maximum")
 BACKWASH_PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "max")
 ECO_VALVE_REGULATION_OPTIONS: tuple[str, ...] = ("off", "always", "buffer_tank")
+HISTORICAL_CACHE_INTERVAL: float = 60 * 60
+HISTORICAL_BACKFILL_WEEKS: int = 13
+HISTORICAL_ROUTE_ID = "pool/routes/$pid.historical"
+HISTORICAL_ROUTE_QUERY = "_routes=root%2Cpool%2Froutes%2F%24pid.historical"
 
 # v3 ``lighting_config.enabled`` is a bitmask.  Never replace this value with
 # a literal 1/3: bits 2 and 3 preserve cover-dependent behaviour.
@@ -167,10 +172,38 @@ class PoolStatus:
     io_version: str | None = None
     deck_version: str | None = None
     mac_address: str | None = None
+    ambient_temperature: float | None = None
+    system_temperature_imx: float | None = None
+    system_temperature_main: float | None = None
+    last_backwash_at: datetime | None = None
     capabilities: frozenset[str] = frozenset()
     raw_live_status: dict[str, Any] | None = None
     raw_v3_status: dict[str, Any] | None = None
     raw_pool_status: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class PoolHistoricalStatus:
+    """Latest values extracted from the low-frequency historical route."""
+
+    ambient_temperature: float | None = None
+    system_temperature_imx: float | None = None
+    system_temperature_main: float | None = None
+    last_backwash_at: datetime | None = None
+
+    @property
+    def available(self) -> bool:
+        """Return whether the historical route supplied at least one value."""
+
+        return any(
+            value is not None
+            for value in (
+                self.ambient_temperature,
+                self.system_temperature_imx,
+                self.system_temperature_main,
+                self.last_backwash_at,
+            )
+        )
 
 
 @dataclass(slots=True)
@@ -817,6 +850,126 @@ def _extract_system_details(decoded: Any, pool_id: str) -> dict[str, Any]:
     }
 
 
+def _as_utc_datetime(value: Any) -> datetime | None:
+    """Convert a SmartPoolConnect epoch or ISO timestamp to UTC."""
+
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(
+            tzinfo=timezone.utc
+        )
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        if not math.isfinite(timestamp):
+            return None
+        if abs(timestamp) >= 100_000_000_000:
+            timestamp /= 1000
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                return _as_utc_datetime(float(text))
+            except ValueError:
+                return None
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(
+            tzinfo=timezone.utc
+        )
+    return None
+
+
+def _historical_route(decoded: Any) -> dict[str, Any] | None:
+    """Return historical route data without relying on flattened slot numbers."""
+
+    exact = route_data(decoded, HISTORICAL_ROUTE_ID)
+    if isinstance(exact, dict):
+        return exact
+    return next(
+        (
+            candidate
+            for candidate in find_dicts(
+                decoded, {"temperature", "backwash", "range", "interval"}
+            )
+            if isinstance(candidate.get("temperature"), dict)
+            and isinstance(candidate.get("backwash"), dict)
+        ),
+        None,
+    )
+
+
+def _latest_historical_metric(route: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the newest valid temperature metric from historical data."""
+
+    temperature = route.get("temperature")
+    metrics = temperature.get("metrics") if isinstance(temperature, dict) else None
+    if not isinstance(metrics, list):
+        return None
+    candidates = [
+        item
+        for item in metrics
+        if isinstance(item, dict) and _as_utc_datetime(item.get("timestamp")) is not None
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: _as_utc_datetime(item.get("timestamp"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+    )
+
+
+def _latest_backwash_timestamp(route: dict[str, Any]) -> datetime | None:
+    """Return the newest observed transition from idle to active backwash."""
+
+    backwash = route.get("backwash")
+    statuses = backwash.get("status") if isinstance(backwash, dict) else None
+    if not isinstance(statuses, list):
+        return None
+    points = sorted(
+        (
+            (timestamp, int(status))
+            for item in statuses
+            if isinstance(item, dict)
+            and (status := _as_float(item.get("status"))) is not None
+            and (timestamp := _as_utc_datetime(item.get("timestamp"))) is not None
+        ),
+        key=lambda point: point[0],
+    )
+    transitions = [
+        timestamp
+        for index, (timestamp, status) in enumerate(points)
+        if status == 1 and (index == 0 or points[index - 1][1] != 1)
+    ]
+    return max(transitions, default=None)
+
+
+def _extract_historical_status(text: str) -> PoolHistoricalStatus:
+    """Decode temperatures and the latest backwash bucket from one route page."""
+
+    decoded = _decode_route_response(text)
+    route = _historical_route(decoded)
+    if route is None:
+        raise SmartPoolConnectError(
+            "SmartPoolConnect returned malformed historical route data"
+        )
+
+    metric = _latest_historical_metric(route)
+    ambient = _as_float(metric.get("ambient_temp")) if metric else None
+    imx = _as_float(metric.get("imx_temp")) if metric else None
+    main_raw = _as_float(metric.get("main_temp")) if metric else None
+    return PoolHistoricalStatus(
+        ambient_temperature=ambient,
+        system_temperature_imx=imx,
+        # MAIN is exposed by SmartPoolConnect in centidegrees Celsius.
+        system_temperature_main=main_raw / 100 if main_raw is not None else None,
+        last_backwash_at=_latest_backwash_timestamp(route),
+    )
+
+
 def _extract_devalue_ph_settings(text: str, pool_id: str | None = None) -> PoolPhSettings:
     decoded = _decode_route_response(text)
     detected, config = _module_and_config(decoded, "ph", pool_id=pool_id)
@@ -1376,6 +1529,9 @@ class SmartPoolConnectClient:
         self._settings_bundle_cached_at: float = 0.0
         self._admin_settings_cache: dict[str, tuple[float, Any]] = {}
         self._last_capabilities: frozenset[str] = frozenset()
+        self._historical_cached_at: float = 0.0
+        self._historical_backfill_complete = False
+        self._historical_status = PoolHistoricalStatus()
 
     async def close(self) -> None:
         await self._session.close()
@@ -1721,6 +1877,96 @@ class SmartPoolConnectClient:
                 raise SmartPoolConnectError("SmartPoolConnect returned malformed pool route data")
             self._pool_route_decoded = decoded
         return self._pool_route_decoded
+
+    def restore_last_backwash(self, value: str | None) -> None:
+        """Restore the persistent backwash cache maintained by the coordinator."""
+
+        restored = _as_utc_datetime(value)
+        if restored is None:
+            return
+        self._historical_status.last_backwash_at = restored
+        self._historical_backfill_complete = True
+
+    def _merge_historical_status(self, update: PoolHistoricalStatus) -> None:
+        """Merge non-null historical values while preserving the last good cache."""
+
+        if update.ambient_temperature is not None:
+            self._historical_status.ambient_temperature = update.ambient_temperature
+        if update.system_temperature_imx is not None:
+            self._historical_status.system_temperature_imx = (
+                update.system_temperature_imx
+            )
+        if update.system_temperature_main is not None:
+            self._historical_status.system_temperature_main = (
+                update.system_temperature_main
+            )
+        if update.last_backwash_at is not None and (
+            self._historical_status.last_backwash_at is None
+            or update.last_backwash_at > self._historical_status.last_backwash_at
+        ):
+            self._historical_status.last_backwash_at = update.last_backwash_at
+
+    async def async_get_historical_status(
+        self, *, force_refresh: bool = False
+    ) -> PoolHistoricalStatus:
+        """Read low-frequency historical values without affecting live telemetry."""
+
+        now = monotonic()
+        if (
+            not force_refresh
+            and self._historical_cached_at
+            and now - self._historical_cached_at < HISTORICAL_CACHE_INTERVAL
+        ):
+            return self._historical_status
+
+        current_path = (
+            f"/pool/{self.pool_id}/historical.data?{HISTORICAL_ROUTE_QUERY}"
+        )
+        try:
+            current = _extract_historical_status(
+                await self._request_text_with_reauth("GET", current_path)
+            )
+        except SmartPoolConnectError:
+            _LOGGER.debug(
+                "Could not refresh SmartPoolConnect historical data; keeping cache",
+                exc_info=True,
+            )
+            return self._historical_status
+
+        self._merge_historical_status(current)
+
+        # The current week has no page parameter. Only a missing cached date
+        # triggers a bounded backwards scan: page=1 is one week ago, etc.
+        if (
+            self._historical_status.last_backwash_at is None
+            and not self._historical_backfill_complete
+        ):
+            for page in range(1, HISTORICAL_BACKFILL_WEEKS + 1):
+                path = (
+                    f"/pool/{self.pool_id}/historical.data?range=week"
+                    f"&interval=1h&page={page}&{HISTORICAL_ROUTE_QUERY}"
+                )
+                try:
+                    older = _extract_historical_status(
+                        await self._request_text_with_reauth("GET", path)
+                    )
+                except SmartPoolConnectError:
+                    _LOGGER.debug(
+                        "Historical backwash scan stopped at week page %s", page,
+                        exc_info=True,
+                    )
+                    break
+                if older.last_backwash_at is not None:
+                    self._merge_historical_status(
+                        PoolHistoricalStatus(
+                            last_backwash_at=older.last_backwash_at
+                        )
+                    )
+                    break
+            self._historical_backfill_complete = True
+
+        self._historical_cached_at = now
+        return self._historical_status
 
     async def _get_current_from_pool_data(self) -> tuple[str | None, float | None, float | None]:
         try:
@@ -2339,6 +2585,7 @@ class SmartPoolConnectClient:
             _LOGGER.debug("Could not read pool route diagnostics", exc_info=True)
             pool_route = None
         system_details = _extract_system_details(pool_route, self.pool_id)
+        historical = await self.async_get_historical_status()
 
         capabilities = {
             name
@@ -2367,6 +2614,8 @@ class SmartPoolConnectClient:
             capabilities.add("live_status_api")
         if v3 is not None:
             capabilities.add("v3_live_api")
+        if historical.available:
+            capabilities.add("historical_data")
 
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
@@ -2622,6 +2871,10 @@ class SmartPoolConnectClient:
             main_version=system_details["main_version"],
             io_version=system_details["io_version"],
             deck_version=system_details["deck_version"],
+            ambient_temperature=historical.ambient_temperature,
+            system_temperature_imx=historical.system_temperature_imx,
+            system_temperature_main=historical.system_temperature_main,
+            last_backwash_at=historical.last_backwash_at,
             capabilities=frozen_capabilities,
             raw_live_status=live,
             raw_v3_status=v3,

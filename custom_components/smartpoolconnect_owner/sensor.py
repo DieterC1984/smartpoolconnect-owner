@@ -12,11 +12,12 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, UnitOfTemperature
+from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from . import SmartPoolConnectConfigEntry
 from .api import PoolStatus
@@ -199,6 +200,42 @@ SENSORS = (
         require_value=True,
     ),
     SmartPoolSensorDescription(
+        key="ambient_temperature",
+        icon="mdi:thermometer",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda s: s.ambient_temperature,
+    ),
+    SmartPoolSensorDescription(
+        key="system_temperature_imx",
+        icon="mdi:thermometer-lines",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda s: s.system_temperature_imx,
+    ),
+    SmartPoolSensorDescription(
+        key="system_temperature_main",
+        icon="mdi:thermometer-lines",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda s: s.system_temperature_main,
+    ),
+    SmartPoolSensorDescription(
+        key="last_backwash",
+        icon="mdi:history",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.DAYS,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda s: s.last_backwash_at,
+    ),
+    SmartPoolSensorDescription(
         key="pool_name",
         icon="mdi:pool",
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -337,6 +374,10 @@ class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):
             "phnix_sub_mode": "PHNIX Sub-mode",
             "phnix_error": "PHNIX Error Code",
             "phnix_fail_0": "PHNIX Failure Register 0",
+            "ambient_temperature": "Ambient Temperature",
+            "system_temperature_imx": "System Temperature IMX",
+            "system_temperature_main": "System Temperature MAIN",
+            "last_backwash": "Last Backwash",
             "pool_name": "Name",
             "mac_address": "MAC Address",
             "pool_id": "Pool ID",
@@ -353,4 +394,31 @@ class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):
         if self.coordinator.data is None:
             return None
 
+        if self.entity_description.key == "last_backwash":
+            value = self.coordinator.data.last_backwash_at
+            if value is None:
+                return None
+            local_date = dt_util.as_local(value).date()
+            return max(0, (dt_util.now().date() - local_date).days)
+
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose the reliable date while avoiding false clock precision."""
+
+        if (
+            self.entity_description.key != "last_backwash"
+            or self.coordinator.data is None
+            or self.coordinator.data.last_backwash_at is None
+        ):
+            return None
+        local_date = dt_util.as_local(
+            self.coordinator.data.last_backwash_at
+        ).date()
+        days = max(0, (dt_util.now().date() - local_date).days)
+        return {
+            "date": local_date.isoformat(),
+            "relative": f"{days} day{'s' if days != 1 else ''} ago",
+            "source": "historical",
+        }
