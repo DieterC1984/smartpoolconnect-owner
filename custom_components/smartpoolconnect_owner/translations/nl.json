@@ -92,11 +92,85 @@
       },
       "temperature_offset_ambient": {
         "name": "Offset omgevingstemperatuur"
+      },
+      "rx_target": {
+        "name": "Cl (Rx)-doelwaarde"
+      },
+      "rx_dosing_time": {
+        "name": "Cl (Rx)-doseertijd"
+      },
+      "rx_pausing_time": {
+        "name": "Cl (Rx)-pauzetijd"
       }
     },
     "select": {
       "temperature_pump_speed": {
-        "name": "Pompsnelheid temperatuurregeling"
+        "name": "Pompsnelheid temperatuurregeling",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_pump_speed": {
+        "name": "Standaard filtersnelheid",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_1_pump_speed": {
+        "name": "Pompsnelheid filterschema 1",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_2_pump_speed": {
+        "name": "Pompsnelheid filterschema 2",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_3_pump_speed": {
+        "name": "Pompsnelheid filterschema 3",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "maximum": "Maximum"
+        }
+      },
+      "backwash_pump_speed": {
+        "name": "Pompsnelheid terugspoeling",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "max": "Maximum"
+        }
+      },
+      "eco_valve_regulation": {
+        "name": "Eco Valve-regeling",
+        "state": {
+          "off": "Uit",
+          "always": "Altijd",
+          "buffer_tank": "Buffervat"
+        }
       }
     },
     "time": {
@@ -105,6 +179,63 @@
       },
       "temperature_schedule_stop_time": {
         "name": "Stoptijd temperatuurschema"
+      }
+    },
+    "sensor": {
+      "rx": {
+        "name": "Cl (Rx)"
+      },
+      "pump_speed": {
+        "name": "Pompsnelheid",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "maximum": "Maximum"
+        }
+      },
+      "cover_state": {
+        "name": "Afdekkingsstatus",
+        "state": {
+          "open": "Open",
+          "closed": "Gesloten",
+          "opening": "Opent",
+          "closing": "Sluit"
+        }
+      },
+      "cl_shock_status": {
+        "name": "Status Cl-schokbehandeling",
+        "state": {
+          "idle": "Inactief",
+          "waiting_for_pump": "Wacht op filterpomp",
+          "active": "Actief"
+        }
+      },
+      "ph_dosing_flow_status": {
+        "name": "Status pH-doseerdoorstroming",
+        "state": {
+          "flow_ok": "Doorstroming OK",
+          "no_flow": "Geen doorstroming"
+        }
+      },
+      "cl_dosing_flow_status": {
+        "name": "Status Cl-doseerdoorstroming",
+        "state": {
+          "flow_ok": "Doorstroming OK",
+          "no_flow": "Geen doorstroming"
+        }
+      }
+    },
+    "button": {
+      "start_backwash": {
+        "name": "Terugspoeling starten"
+      },
+      "start_cl_shock": {
+        "name": "Cl-schokbehandeling starten"
+      },
+      "stop_cl_shock": {
+        "name": "Cl-schokbehandeling stoppen"
       }
     }
   }

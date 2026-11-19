@@ -92,11 +92,85 @@
       },
       "temperature_offset_ambient": {
         "name": "Ambient temperature offset"
+      },
+      "rx_target": {
+        "name": "Cl (Rx) target"
+      },
+      "rx_dosing_time": {
+        "name": "Cl (Rx) dosing time"
+      },
+      "rx_pausing_time": {
+        "name": "Cl (Rx) pause time"
       }
     },
     "select": {
       "temperature_pump_speed": {
-        "name": "Temperature pump speed"
+        "name": "Temperature pump speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_pump_speed": {
+        "name": "Filter pump standard speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_1_pump_speed": {
+        "name": "Filter schedule 1 pump speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_2_pump_speed": {
+        "name": "Filter schedule 2 pump speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_3_pump_speed": {
+        "name": "Filter schedule 3 pump speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "maximum": "Maximum"
+        }
+      },
+      "backwash_pump_speed": {
+        "name": "Backwash pump speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "max": "Maximum"
+        }
+      },
+      "eco_valve_regulation": {
+        "name": "Eco Valve regulation",
+        "state": {
+          "off": "Off",
+          "always": "Always",
+          "buffer_tank": "Buffer tank"
+        }
       }
     },
     "time": {
@@ -105,6 +179,63 @@
       },
       "temperature_schedule_stop_time": {
         "name": "Temperature schedule stop time"
+      }
+    },
+    "sensor": {
+      "rx": {
+        "name": "Cl (Rx)"
+      },
+      "pump_speed": {
+        "name": "Pump speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "maximum": "Maximum"
+        }
+      },
+      "cover_state": {
+        "name": "Cover state",
+        "state": {
+          "open": "Open",
+          "closed": "Closed",
+          "opening": "Opening",
+          "closing": "Closing"
+        }
+      },
+      "cl_shock_status": {
+        "name": "Cl shock treatment status",
+        "state": {
+          "idle": "Idle",
+          "waiting_for_pump": "Waiting for pump",
+          "active": "Active"
+        }
+      },
+      "ph_dosing_flow_status": {
+        "name": "pH dosing flow status",
+        "state": {
+          "flow_ok": "Flow OK",
+          "no_flow": "No flow"
+        }
+      },
+      "cl_dosing_flow_status": {
+        "name": "Cl dosing flow status",
+        "state": {
+          "flow_ok": "Flow OK",
+          "no_flow": "No flow"
+        }
+      }
+    },
+    "button": {
+      "start_backwash": {
+        "name": "Backwash trigger"
+      },
+      "start_cl_shock": {
+        "name": "Start Cl shock treatment"
+      },
+      "stop_cl_shock": {
+        "name": "Stop Cl shock treatment"
       }
     }
   }

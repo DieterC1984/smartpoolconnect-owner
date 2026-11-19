@@ -1,0 +1,242 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SmartPoolConnect Owner",
+        "description": "Melden Sie sich mit Ihren SmartPoolConnect-Owner-Zugangsdaten und der Pool-UUID an.",
+        "data": {
+          "pool_id": "Pool-UUID",
+          "username": "E-Mail",
+          "password": "Passwort"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Ungültige Anmeldedaten.",
+      "cannot_connect": "Verbindung zu SmartPoolConnect konnte nicht hergestellt werden.",
+      "unknown": "Unerwarteter Fehler."
+    },
+    "abort": {
+      "already_configured": "Dieser Pool ist bereits konfiguriert."
+    }
+  },
+  "entity": {
+    "switch": {
+      "zero_e_enabled": {
+        "name": "Zero-E aktiviert"
+      },
+      "temperature_priority": {
+        "name": "Temperaturpriorität"
+      },
+      "temperature_frost_protection": {
+        "name": "Frostschutz der Temperaturregelung"
+      },
+      "temperature_schedule_enabled": {
+        "name": "Temperaturzeitplan aktiviert"
+      },
+      "temperature_schedule_monday": {
+        "name": "Temperaturzeitplan Montag"
+      },
+      "temperature_schedule_tuesday": {
+        "name": "Temperaturzeitplan Dienstag"
+      },
+      "temperature_schedule_wednesday": {
+        "name": "Temperaturzeitplan Mittwoch"
+      },
+      "temperature_schedule_thursday": {
+        "name": "Temperaturzeitplan Donnerstag"
+      },
+      "temperature_schedule_friday": {
+        "name": "Temperaturzeitplan Freitag"
+      },
+      "temperature_schedule_saturday": {
+        "name": "Temperaturzeitplan Samstag"
+      },
+      "temperature_schedule_sunday": {
+        "name": "Temperaturzeitplan Sonntag"
+      },
+      "lighting": {
+        "name": "Beleuchtung"
+      },
+      "lighting_cover_disabled": {
+        "name": "Beleuchtung bei geschlossener externer Abdeckung deaktiviert"
+      },
+      "lighting_internal_cover_disabled": {
+        "name": "Beleuchtung bei geschlossener interner Abdeckung deaktiviert"
+      },
+      "lighting_schedule_enabled": {
+        "name": "Beleuchtungszeitplan"
+      }
+    },
+    "number": {
+      "zero_e_enable_threshold": {
+        "name": "Zero-E-Einschaltschwelle"
+      },
+      "zero_e_disable_threshold": {
+        "name": "Zero-E-Ausschaltschwelle"
+      },
+      "zero_e_target_temperature": {
+        "name": "Zero-E-Zieltemperatur"
+      },
+      "temperature_target": {
+        "name": "Temperatur-Sollwert"
+      },
+      "temperature_interval": {
+        "name": "Temperaturintervall"
+      },
+      "temperature_cooling_period": {
+        "name": "Temperatur-Abkühlzeit"
+      },
+      "temperature_offset_water": {
+        "name": "Korrekturwert Wassertemperatur"
+      },
+      "temperature_offset_ambient": {
+        "name": "Korrekturwert Umgebungstemperatur"
+      },
+      "rx_target": {
+        "name": "Cl (Rx)-Sollwert"
+      },
+      "rx_dosing_time": {
+        "name": "Cl (Rx)-Dosierzeit"
+      },
+      "rx_pausing_time": {
+        "name": "Cl (Rx)-Pausenzeit"
+      }
+    },
+    "select": {
+      "temperature_pump_speed": {
+        "name": "Pumpengeschwindigkeit der Temperaturregelung",
+        "state": {
+          "off": "Aus",
+          "low": "Niedrig",
+          "medium": "Mittel",
+          "high": "Hoch",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_pump_speed": {
+        "name": "Standardgeschwindigkeit der Filterpumpe",
+        "state": {
+          "off": "Aus",
+          "low": "Niedrig",
+          "medium": "Mittel",
+          "high": "Hoch",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_1_pump_speed": {
+        "name": "Pumpengeschwindigkeit Filterzeitplan 1",
+        "state": {
+          "off": "Aus",
+          "low": "Niedrig",
+          "medium": "Mittel",
+          "high": "Hoch",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_2_pump_speed": {
+        "name": "Pumpengeschwindigkeit Filterzeitplan 2",
+        "state": {
+          "off": "Aus",
+          "low": "Niedrig",
+          "medium": "Mittel",
+          "high": "Hoch",
+          "maximum": "Maximum"
+        }
+      },
+      "filter_schedule_3_pump_speed": {
+        "name": "Pumpengeschwindigkeit Filterzeitplan 3",
+        "state": {
+          "off": "Aus",
+          "low": "Niedrig",
+          "medium": "Mittel",
+          "high": "Hoch",
+          "maximum": "Maximum"
+        }
+      },
+      "backwash_pump_speed": {
+        "name": "Pumpengeschwindigkeit der Rückspülung",
+        "state": {
+          "off": "Aus",
+          "low": "Niedrig",
+          "medium": "Mittel",
+          "high": "Hoch",
+          "max": "Maximum"
+        }
+      },
+      "eco_valve_regulation": {
+        "name": "Eco Valve-Regelung",
+        "state": {
+          "off": "Aus",
+          "always": "Immer",
+          "buffer_tank": "Pufferspeicher"
+        }
+      }
+    },
+    "time": {
+      "temperature_schedule_start_time": {
+        "name": "Startzeit des Temperaturzeitplans"
+      },
+      "temperature_schedule_stop_time": {
+        "name": "Endzeit des Temperaturzeitplans"
+      }
+    },
+    "sensor": {
+      "rx": {
+        "name": "Cl (Rx)"
+      },
+      "pump_speed": {
+        "name": "Pumpengeschwindigkeit",
+        "state": {
+          "off": "Aus",
+          "low": "Niedrig",
+          "medium": "Mittel",
+          "high": "Hoch",
+          "maximum": "Maximum"
+        }
+      },
+      "cover_state": {
+        "name": "Abdeckungsstatus",
+        "state": {
+          "open": "Geöffnet",
+          "closed": "Geschlossen",
+          "opening": "Öffnet",
+          "closing": "Schließt"
+        }
+      },
+      "cl_shock_status": {
+        "name": "Status der Cl-Schockbehandlung",
+        "state": {
+          "idle": "Inaktiv",
+          "waiting_for_pump": "Wartet auf Filterpumpe",
+          "active": "Aktiv"
+        }
+      },
+      "ph_dosing_flow_status": {
+        "name": "pH-Dosierdurchflussstatus",
+        "state": {
+          "flow_ok": "Durchfluss OK",
+          "no_flow": "Kein Durchfluss"
+        }
+      },
+      "cl_dosing_flow_status": {
+        "name": "Cl-Dosierdurchflussstatus",
+        "state": {
+          "flow_ok": "Durchfluss OK",
+          "no_flow": "Kein Durchfluss"
+        }
+      }
+    },
+    "button": {
+      "start_backwash": {
+        "name": "Rückspülung starten"
+      },
+      "start_cl_shock": {
+        "name": "Cl-Schockbehandlung starten"
+      },
+      "stop_cl_shock": {
+        "name": "Cl-Schockbehandlung stoppen"
+      }
+    }
+  }
+}
