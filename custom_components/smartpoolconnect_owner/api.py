@@ -1,16 +1,18 @@
 """Async client for SmartPoolConnect owner portal."""
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html import unescape
 import json
 import logging
 import math
 import re
 import secrets
 from time import monotonic
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urljoin
 
 import aiohttp
@@ -29,6 +31,37 @@ DAYS: tuple[str, ...] = ("monday", "tuesday", "wednesday", "thursday", "friday",
 PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "maximum")
 BACKWASH_PUMP_SPEED_OPTIONS: tuple[str, ...] = ("off", "low", "medium", "high", "max")
 ECO_VALVE_REGULATION_OPTIONS: tuple[str, ...] = ("off", "always", "buffer_tank")
+CL_SHOCK_STATUS: dict[int, str] = {
+    0: "idle",
+    201: "waiting_for_pump",
+    205: "active",
+}
+_HTML_BADGE_PATTERN = re.compile(
+    r'<span\b[^>]*\bdata-slot=["\']badge["\'][^>]*>(.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+_PH_PAGE_CONTENT_PATTERN = re.compile(
+    r'<(?:main|form)\b[^>]*>(.*?)</(?:main|form)>',
+    re.IGNORECASE | re.DOTALL,
+)
+_API_VERSION_PATTERN = re.compile(r"^v?(\d+(?:\.\d+)*)$", re.IGNORECASE)
+_STREAM_ENQUEUE_CALL_PATTERN = re.compile(
+    r"streamController\s*\.\s*enqueue\s*\(", re.IGNORECASE
+)
+_STREAM_CHUNK_PATTERN = re.compile(r"^([A-Z])(\d+):(.*)$", re.DOTALL)
+# Bounds apply only to API-version extraction from the streamed pool document.
+# They do not change the independent 8 MiB rendered-page scan used by pH/Cl.
+_MAX_POOL_DOCUMENT_SCAN_BYTES = 8 * 1024 * 1024
+_MAX_INITIAL_STREAM_PAYLOAD_BYTES = 2 * 1024 * 1024
+_MAX_INITIAL_STREAM_SLOTS = 50_000
+_MAX_STREAM_ARGUMENT_BYTES = 2 * 1024 * 1024
+_MAX_STREAM_CHUNKS = 64
+_MAX_POOL_SUMMARY_CHUNK_BYTES = 256 * 1024
+_MAX_POOL_SUMMARY_SLOTS = 4096
+# Flow badges are rendered before the first stream continuation and can occur
+# several megabytes into the pH/Cl pages. Keep this bound unchanged.
+_MAX_RENDERED_PAGE_SCAN_BYTES = 8 * 1024 * 1024
 HISTORICAL_CACHE_INTERVAL: float = 60 * 60
 HISTORICAL_BACKFILL_WEEKS: int = 13
 HISTORICAL_ROUTE_ID = "pool/routes/$pid.historical"
@@ -93,6 +126,9 @@ class PoolStatus:
     rx_target: float | None = None
     rx_dosing_time: float | None = None
     rx_pausing_time: float | None = None
+    cl_shock_status: str | None = None
+    ph_dosing_flow_status: str | None = None
+    cl_dosing_flow_status: str | None = None
     lighting_on: bool | None = None
     lighting_always_active: bool | None = None
     lighting_cover_disabled: bool | None = None
@@ -171,6 +207,7 @@ class PoolStatus:
     main_version: str | None = None
     io_version: str | None = None
     deck_version: str | None = None
+    api_version: str | None = None
     mac_address: str | None = None
     ambient_temperature: float | None = None
     system_temperature_imx: float | None = None
@@ -450,6 +487,105 @@ def _cover_state(value: Any) -> str | None:
     return {1: "open", 2: "closed", 3: "opening", 4: "closing", "open": "open", "closed": "closed", "opening": "opening", "closing": "closing"}.get(value)
 
 
+def _status_value(module: Any) -> int | None:
+    """Return the newest numeric status from a controller module."""
+
+    if not isinstance(module, dict):
+        return None
+    raw_status = module.get("status")
+    direct = _as_int(raw_status)
+    if direct is not None:
+        return direct
+    if isinstance(raw_status, dict):
+        for key in ("actual", "value", "status"):
+            direct = _as_int(raw_status.get(key))
+            if direct is not None:
+                return direct
+    if isinstance(raw_status, list):
+        candidates = [
+            item
+            for item in raw_status
+            if isinstance(item, dict) and _as_int(item.get("status")) is not None
+        ]
+        if candidates:
+            latest = max(
+                candidates,
+                key=lambda item: _as_float(item.get("timestamp")) or float("-inf"),
+            )
+            return _as_int(latest.get("status"))
+    return None
+
+
+def _cl_shock_state(data: Any) -> str | None:
+    """Read only confirmed Cl shock status codes from semantic Cl blocks."""
+
+    for name in ("cl", "cl_data", "rx_data", "dosing_data"):
+        block = _find_data_block(data, name)
+        if not isinstance(block, dict):
+            continue
+        values = _column_values(block)
+        candidates: tuple[Any, ...] = (
+            values.get("shock_status"),
+            values.get("cl_status"),
+            block.get("shock_status"),
+            block.get("cl_status"),
+        )
+        if name in ("cl", "cl_data", "rx_data"):
+            candidates += (values.get("status"), _status_value(block))
+        for candidate in candidates:
+            status = _as_int(candidate)
+            if status in CL_SHOCK_STATUS:
+                return CL_SHOCK_STATUS[status]
+    return None
+
+
+def _extract_dosing_page_flow_status(
+    document: str, ok_label: str
+) -> str | None:
+    """Parse only a confirmed current badge in a server-rendered dosing page.
+
+    Translation dictionaries embedded elsewhere in the document contain both
+    labels and must not be mistaken for the live badge. Restricting the parser
+    to rendered ``data-slot=badge`` elements prevents that false positive.
+    """
+
+    if not isinstance(document, str) or not document.strip():
+        return None
+    scan_limit = min(len(document), _MAX_RENDERED_PAGE_SCAN_BYTES)
+    stream_index = document.find("streamController.enqueue", 0, scan_limit)
+    if stream_index < 0:
+        if len(document) > _MAX_RENDERED_PAGE_SCAN_BYTES:
+            return None
+        stream_index = len(document)
+    body = document[:stream_index]
+    regions = _PH_PAGE_CONTENT_PATTERN.findall(body)
+    if regions:
+        body = "\n".join(regions)
+    labels = []
+    for raw in _HTML_BADGE_PATTERN.findall(body):
+        label = unescape(_HTML_TAG_PATTERN.sub("", raw)).strip()
+        if label in {ok_label, "Geen Doorstroming"}:
+            labels.append(label)
+    unique = set(labels)
+    if unique == {ok_label}:
+        return "flow_ok"
+    if unique == {"Geen Doorstroming"}:
+        return "no_flow"
+    return None
+
+
+def _extract_ph_page_flow_status(document: str) -> str | None:
+    """Parse the confirmed ``pH OK``/``Geen Doorstroming`` page badge."""
+
+    return _extract_dosing_page_flow_status(document, "pH OK")
+
+
+def _extract_cl_page_flow_status(document: str) -> str | None:
+    """Parse the confirmed ``Cl OK``/``Geen Doorstroming`` page badge."""
+
+    return _extract_dosing_page_flow_status(document, "Cl OK")
+
+
 def _find_data_block(obj: Any, name: str) -> dict[str, Any] | None:
     """Find one named controller block without confusing it with a column."""
 
@@ -618,6 +754,391 @@ def _decode_route_response(text: Any) -> Any | None:
         return None
 
 
+def _normalise_api_version(raw_version: Any) -> str | None:
+    """Return an API-version display value such as ``v2``."""
+
+    if isinstance(raw_version, bool):
+        return None
+    if isinstance(raw_version, int):
+        return f"v{raw_version}" if raw_version >= 0 else None
+    if isinstance(raw_version, float):
+        return (
+            f"v{int(raw_version)}"
+            if raw_version >= 0 and raw_version.is_integer()
+            else None
+        )
+    if not isinstance(raw_version, str):
+        return None
+    match = _API_VERSION_PATTERN.fullmatch(raw_version.strip())
+    return f"v{match.group(1)}" if match else None
+
+
+def _count_flattened_slots(payload: str) -> int | None:
+    """Count an initial flattened JSON table without decoding its values.
+
+    Remix continuation references use the initial table's length as their
+    global offset.  A string-aware structural scan supplies that offset without
+    allocating the 24k-slot table or hydrating any part of the graph.
+    """
+
+    if not payload or len(payload) > _MAX_INITIAL_STREAM_PAYLOAD_BYTES:
+        return None
+    position = 0
+    length = len(payload)
+    while position < length and payload[position].isspace():
+        position += 1
+    if position >= length or payload[position] != "[":
+        return None
+
+    stack = ["]"]
+    position += 1
+    in_string = False
+    escaped = False
+    value_started = False
+    after_comma = False
+    count = 0
+
+    while position < length:
+        character = payload[position]
+        position += 1
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+            if len(stack) == 1:
+                value_started = True
+                after_comma = False
+            continue
+        if character in "[{":
+            stack.append("]" if character == "[" else "}")
+            if len(stack) == 2:
+                value_started = True
+                after_comma = False
+            continue
+        if character in "]}":
+            if not stack or character != stack[-1]:
+                return None
+            if len(stack) == 1:
+                if after_comma:
+                    return None
+                if value_started:
+                    count += 1
+                if count > _MAX_INITIAL_STREAM_SLOTS:
+                    return None
+                return count if not payload[position:].strip() else None
+            stack.pop()
+            continue
+        if len(stack) != 1:
+            continue
+        if character == ",":
+            if not value_started:
+                return None
+            count += 1
+            if count > _MAX_INITIAL_STREAM_SLOTS:
+                return None
+            value_started = False
+            after_comma = True
+        elif not character.isspace():
+            value_started = True
+            after_comma = False
+    return None
+
+
+def _chunk_reference(
+    slots: list[Any], start_index: int, reference: Any
+) -> Any | None:
+    """Resolve one continuation-local reference without hydrating its graph."""
+
+    if not isinstance(reference, int) or isinstance(reference, bool):
+        return None
+    local_index = reference - start_index
+    if 0 <= local_index < len(slots):
+        return slots[local_index]
+    return None
+
+
+def _chunk_object_field(
+    slots: list[Any], start_index: int, record: Any, field: str
+) -> Any | None:
+    """Resolve one named field from a continuation-local flattened object."""
+
+    if not isinstance(record, dict):
+        return None
+    # Accept literal objects as a defensive renderer compatibility path.
+    if field in record:
+        return record.get(field)
+    for raw_key, value_reference in record.items():
+        if not isinstance(raw_key, str) or not raw_key.startswith("_"):
+            continue
+        try:
+            key_reference = int(raw_key[1:])
+        except ValueError:
+            continue
+        if _chunk_reference(slots, start_index, key_reference) == field:
+            return _chunk_reference(slots, start_index, value_reference)
+    return None
+
+
+def _extract_api_version_from_summary_chunk(
+    slots: list[Any],
+    start_index: int,
+    pool_id: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> str | None:
+    """Resolve ``root.items`` and select the configured flattened pool record."""
+
+    if not slots:
+        return None
+    root = slots[0]  # The continuation root is at absolute ``start_index``.
+    items = _chunk_object_field(slots, start_index, root, "items")
+    if isinstance(items, list):
+        for item_reference in items:
+            record = _chunk_reference(slots, start_index, item_reference)
+            if _chunk_object_field(slots, start_index, record, "pid") != pool_id:
+                continue
+            if diagnostics is not None:
+                diagnostics["configured_pool_found"] = True
+            raw_version = _chunk_object_field(
+                slots, start_index, record, "api_version"
+            )
+            api_version = _normalise_api_version(raw_version)
+            if api_version is not None:
+                return api_version
+
+    # Accept a compact literal record if a renderer emits one.
+    if isinstance(root, dict) and root.get("pid") == pool_id:
+        if diagnostics is not None:
+            diagnostics["configured_pool_found"] = True
+        return _normalise_api_version(root.get("api_version"))
+    return None
+
+
+def _summary_chunk_start_candidates(
+    slots: list[Any], initial_slot_count: int | None
+) -> Iterator[int]:
+    """Yield bounded candidate offsets for one pool-summary continuation.
+
+    Normally the continuation starts at ``len(initial_flattened_table)``.  The
+    streamed summary is also self-describing, however: its root object's key
+    reference for ``items`` and the local position of the literal ``items``
+    differ by exactly the continuation start.  Deriving that offset lets the
+    small summary continuation be resolved even when the preceding megabyte-
+    sized enqueue frame cannot be decoded in the live HTTP response.
+    """
+
+    candidates: list[int] = []
+    if isinstance(initial_slot_count, int) and initial_slot_count >= 0:
+        candidates.append(initial_slot_count)
+
+    root = slots[0] if slots else None
+    if isinstance(root, dict):
+        item_key_positions = [
+            index for index, value in enumerate(slots) if value == "items"
+        ]
+        for raw_key in root:
+            if not isinstance(raw_key, str) or not raw_key.startswith("_"):
+                continue
+            try:
+                key_reference = int(raw_key[1:])
+            except ValueError:
+                continue
+            for local_index in item_key_positions:
+                candidate = key_reference - local_index
+                if candidate >= 0:
+                    candidates.append(candidate)
+
+    # A compact literal record does not use global references.
+    candidates.append(0)
+    yielded: set[int] = set()
+    for candidate in candidates:
+        if candidate in yielded:
+            continue
+        yielded.add(candidate)
+        yield candidate
+
+
+def _iter_pool_document_continuations(
+    document: Any,
+) -> Iterator[tuple[int, str, int, int, list[Any]]]:
+    """Yield bounded continuations with their true append positions.
+
+    The chunk id identifies the promise being fulfilled.  It is deliberately
+    returned only as metadata and is never used as a slot offset.  Continuation
+    slots append at the current flattened-table length.
+    """
+
+    if (
+        not isinstance(document, str)
+        or not document
+        or len(document) > _MAX_POOL_DOCUMENT_SCAN_BYTES
+    ):
+        return
+
+    decoder = json.JSONDecoder()
+    position = 0
+    initial_slot_count: int | None = None
+    next_chunk_start: int | None = None
+    chunk_count = 0
+
+    while match := _STREAM_ENQUEUE_CALL_PATTERN.search(document, position):
+        argument_start = match.end()
+        position = argument_start
+        raw_argument = document[
+            argument_start : argument_start + _MAX_STREAM_ARGUMENT_BYTES
+        ]
+        encoded_argument = raw_argument.lstrip()
+        leading_whitespace = len(raw_argument) - len(encoded_argument)
+        try:
+            payload, consumed = decoder.raw_decode(encoded_argument)
+        except json.JSONDecodeError:
+            continue
+        position = argument_start + leading_whitespace + consumed
+        if not isinstance(payload, str):
+            continue
+
+        stripped = payload.strip()
+        if initial_slot_count is None:
+            if not stripped.startswith("["):
+                continue
+            initial_slot_count = _count_flattened_slots(stripped)
+            if initial_slot_count is None:
+                return
+            next_chunk_start = initial_slot_count
+            continue
+
+        chunk_match = _STREAM_CHUNK_PATTERN.fullmatch(stripped)
+        if chunk_match is None or next_chunk_start is None:
+            continue
+        chunk_count += 1
+        if chunk_count > _MAX_STREAM_CHUNKS:
+            return
+        kind, raw_chunk_id, body = chunk_match.groups()
+        if len(body) > _MAX_POOL_SUMMARY_CHUNK_BYTES:
+            return
+        try:
+            slots = json.loads(body)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(slots, list) or len(slots) > _MAX_POOL_SUMMARY_SLOTS:
+            return
+
+        # Append at the current table length.  For the supplied real document
+        # this is 24,047 even though the promise being fulfilled is P24040.
+        chunk_start = next_chunk_start
+        next_chunk_start += len(slots)
+        yield (
+            initial_slot_count,
+            kind,
+            int(raw_chunk_id),
+            chunk_start,
+            slots,
+        )
+
+
+def _extract_api_version_from_pool_document(
+    document: Any,
+    pool_id: str,
+    diagnostics: dict[str, Any] | None = None,
+) -> str | None:
+    """Selectively decode the configured pool's streamed API version.
+
+    This preserves the successful semantics of the original implementation:
+    locate the configured pool record by its exact ``pid`` and read that same
+    record's ``api_version``.  Unlike the original, it never expands the full
+    Remix graph.  It first uses the initial table length when available, then
+    validates a continuation-local offset derived from the ``items`` reference
+    so the small summary does not depend on decoding the large initial frame.
+    """
+
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "document_length": len(document) if isinstance(document, str) else 0,
+                "enqueue_chunks": 0,
+                "initial_flattened_slots": None,
+                "continuation_label": None,
+                "continuation_slots": None,
+                "configured_pool_found": False,
+                "resolved": False,
+            }
+        )
+    if (
+        not pool_id
+        or not isinstance(document, str)
+        or not document
+        or len(document) > _MAX_POOL_DOCUMENT_SCAN_BYTES
+    ):
+        return None
+
+    decoder = json.JSONDecoder()
+    position = 0
+    initial_slot_count: int | None = None
+    while match := _STREAM_ENQUEUE_CALL_PATTERN.search(document, position):
+        if diagnostics is not None:
+            diagnostics["enqueue_chunks"] += 1
+        argument_start = match.end()
+        position = argument_start
+        raw_argument = document[
+            argument_start : argument_start + _MAX_STREAM_ARGUMENT_BYTES
+        ]
+        encoded_argument = raw_argument.lstrip()
+        leading_whitespace = len(raw_argument) - len(encoded_argument)
+        try:
+            payload, consumed = decoder.raw_decode(encoded_argument)
+        except json.JSONDecodeError:
+            # Do not make the small continuation depend on successful decoding
+            # of a preceding, much larger initial enqueue argument.
+            continue
+        position = argument_start + leading_whitespace + consumed
+        if not isinstance(payload, str):
+            continue
+
+        stripped = payload.strip()
+        if stripped.startswith("["):
+            initial_slot_count = _count_flattened_slots(stripped)
+            if diagnostics is not None:
+                diagnostics["initial_flattened_slots"] = initial_slot_count
+            continue
+
+        chunk_match = _STREAM_CHUNK_PATTERN.fullmatch(stripped)
+        if chunk_match is None:
+            continue
+        kind, raw_chunk_id, body = chunk_match.groups()
+        if kind != "P" or len(body) > _MAX_POOL_SUMMARY_CHUNK_BYTES:
+            continue
+        try:
+            slots = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(slots, list) or len(slots) > _MAX_POOL_SUMMARY_SLOTS:
+            continue
+        if diagnostics is not None:
+            diagnostics["continuation_label"] = f"{kind}{raw_chunk_id}"
+            diagnostics["continuation_slots"] = len(slots)
+
+        for chunk_start in _summary_chunk_start_candidates(
+            slots, initial_slot_count
+        ):
+            api_version = _extract_api_version_from_summary_chunk(
+                slots,
+                chunk_start,
+                pool_id,
+                diagnostics,
+            )
+            if api_version is not None:
+                if diagnostics is not None:
+                    diagnostics["resolved"] = True
+                return api_version
+    return None
+
+
 def _route_entries(decoded: Any) -> list[tuple[str, Any]]:
     if not isinstance(decoded, dict):
         return []
@@ -784,16 +1305,29 @@ def _metric_actual(module: Any) -> float | None:
     return None
 
 
-def _extract_current_from_pool_data(text: str, pool_id: str) -> tuple[str | None, float | None, float | None]:
+def _extract_current_from_pool_data(
+    text: str, pool_id: str
+) -> tuple[
+    str | None,
+    float | None,
+    float | None,
+    str | None,
+]:
     decoded = _decode_route_response(text)
     pool = _find_pool_record(decoded, pool_id)
     if pool is None:
         _LOGGER.warning("POOL DATA: pool_id not found: %s", pool_id)
-        return None, None, None
+        return None, None, None, None
     name = pool.get("name") if isinstance(pool.get("name"), str) else None
     ph = _metric_actual(pool.get("ph"))
     rx = _sanitize_rx(_metric_actual(pool.get("cl")))
-    return name, round(ph, 2) if ph is not None else None, round(rx, 0) if rx is not None else None
+    shock = _cl_shock_state({"cl": pool.get("cl")})
+    return (
+        name,
+        round(ph, 2) if ph is not None else None,
+        round(rx, 0) if rx is not None else None,
+        shock,
+    )
 
 
 def _normalize_mac_address(value: Any) -> str | None:
@@ -848,6 +1382,15 @@ def _extract_system_details(decoded: Any, pool_id: str) -> dict[str, Any]:
         "io_version": version("io_version"),
         "deck_version": version("deck_version"),
     }
+
+
+def _extract_api_version(decoded: Any, pool_id: str) -> str | None:
+    """Return the pool API version as a display value such as ``v2``."""
+
+    pool = _find_pool_record(decoded, pool_id)
+    if not isinstance(pool, dict):
+        return None
+    return _normalise_api_version(pool.get("api_version"))
 
 
 def _as_utc_datetime(value: Any) -> datetime | None:
@@ -1525,6 +2068,26 @@ class SmartPoolConnectClient:
         self._pool_route_text: str | None = None
         self._pool_route_decoded: Any | None = None
         self._pool_route_cached_at: float = 0.0
+        self._pool_route_fetch_lock = asyncio.Lock()
+        self._pool_route_decode_lock = asyncio.Lock()
+        # Keep the last valid value independently from route freshness.  API
+        # Version is resolved from the already-fetched pool route; no separate
+        # rendered HTML document request is needed.
+        self._pool_route_api_version: str | None = None
+        self._current_pool_data: tuple[
+            str | None,
+            float | None,
+            float | None,
+            str | None,
+        ] = (None, None, None, None)
+        self._current_pool_data_generation = 0
+        self._current_pool_data_lock = asyncio.Lock()
+        self._ph_page_flow_status: str | None = None
+        self._ph_page_flow_generation = 0
+        self._ph_page_flow_lock = asyncio.Lock()
+        self._cl_page_flow_status: str | None = None
+        self._cl_page_flow_generation = 0
+        self._cl_page_flow_lock = asyncio.Lock()
         self._settings_bundle: tuple[Any, ...] | None = None
         self._settings_bundle_cached_at: float = 0.0
         self._admin_settings_cache: dict[str, tuple[float, Any]] = {}
@@ -1532,6 +2095,7 @@ class SmartPoolConnectClient:
         self._historical_cached_at: float = 0.0
         self._historical_backfill_complete = False
         self._historical_status = PoolHistoricalStatus()
+        self._historical_lock = asyncio.Lock()
 
     async def close(self) -> None:
         await self._session.close()
@@ -1863,19 +2427,33 @@ class SmartPoolConnectClient:
         now = monotonic()
         if not force_refresh and self._pool_route_text is not None and now - self._pool_route_cached_at < SETTINGS_CACHE_INTERVAL:
             return self._pool_route_text
-        text = await self._request_text_with_reauth("GET", f"/pool/{self.pool_id}.data")
-        self._pool_route_text = text
-        self._pool_route_decoded = None
-        self._pool_route_cached_at = now
-        return text
+        async with self._pool_route_fetch_lock:
+            now = monotonic()
+            if (
+                not force_refresh
+                and self._pool_route_text is not None
+                and now - self._pool_route_cached_at < SETTINGS_CACHE_INTERVAL
+            ):
+                return self._pool_route_text
+            text = await self._request_text_with_reauth(
+                "GET", f"/pool/{self.pool_id}.data"
+            )
+            self._pool_route_text = text
+            self._pool_route_decoded = None
+            self._pool_route_cached_at = now
+            return text
 
     async def _get_pool_route_decoded(self, *, force_refresh: bool = False) -> Any:
         text = await self._get_pool_route_text(force_refresh=force_refresh)
         if self._pool_route_decoded is None:
-            decoded = _decode_route_response(text)
-            if decoded is None:
-                raise SmartPoolConnectError("SmartPoolConnect returned malformed pool route data")
-            self._pool_route_decoded = decoded
+            async with self._pool_route_decode_lock:
+                if self._pool_route_decoded is None:
+                    decoded = await asyncio.to_thread(_decode_route_response, text)
+                    if decoded is None:
+                        raise SmartPoolConnectError(
+                            "SmartPoolConnect returned malformed pool route data"
+                        )
+                    self._pool_route_decoded = decoded
         return self._pool_route_decoded
 
     def restore_last_backwash(self, value: str | None) -> None:
@@ -1919,62 +2497,156 @@ class SmartPoolConnectClient:
         ):
             return self._historical_status
 
-        current_path = (
-            f"/pool/{self.pool_id}/historical.data?{HISTORICAL_ROUTE_QUERY}"
-        )
-        try:
-            current = _extract_historical_status(
-                await self._request_text_with_reauth("GET", current_path)
+        async with self._historical_lock:
+            now = monotonic()
+            if (
+                not force_refresh
+                and self._historical_cached_at
+                and now - self._historical_cached_at < HISTORICAL_CACHE_INTERVAL
+            ):
+                return self._historical_status
+
+            current_path = (
+                f"/pool/{self.pool_id}/historical.data?{HISTORICAL_ROUTE_QUERY}"
             )
-        except SmartPoolConnectError:
-            _LOGGER.debug(
-                "Could not refresh SmartPoolConnect historical data; keeping cache",
-                exc_info=True,
-            )
+            try:
+                current_text = await self._request_text_with_reauth(
+                    "GET", current_path
+                )
+                current = await asyncio.to_thread(
+                    _extract_historical_status, current_text
+                )
+            except SmartPoolConnectError:
+                _LOGGER.debug(
+                    "Could not refresh SmartPoolConnect historical data; keeping cache",
+                    exc_info=True,
+                )
+                return self._historical_status
+
+            self._merge_historical_status(current)
+
+            # The current week has no page parameter. Only a missing cached date
+            # triggers a bounded backwards scan: page=1 is one week ago, etc.
+            if (
+                self._historical_status.last_backwash_at is None
+                and not self._historical_backfill_complete
+            ):
+                for page in range(1, HISTORICAL_BACKFILL_WEEKS + 1):
+                    path = (
+                        f"/pool/{self.pool_id}/historical.data?range=week"
+                        f"&interval=1h&page={page}&{HISTORICAL_ROUTE_QUERY}"
+                    )
+                    try:
+                        older_text = await self._request_text_with_reauth("GET", path)
+                        older = await asyncio.to_thread(
+                            _extract_historical_status, older_text
+                        )
+                    except SmartPoolConnectError:
+                        _LOGGER.debug(
+                            "Historical backwash scan stopped at week page %s", page,
+                            exc_info=True,
+                        )
+                        break
+                    if older.last_backwash_at is not None:
+                        self._merge_historical_status(
+                            PoolHistoricalStatus(
+                                last_backwash_at=older.last_backwash_at
+                            )
+                        )
+                        break
+                self._historical_backfill_complete = True
+
+            self._historical_cached_at = now
             return self._historical_status
 
-        self._merge_historical_status(current)
-
-        # The current week has no page parameter. Only a missing cached date
-        # triggers a bounded backwards scan: page=1 is one week ago, etc.
-        if (
-            self._historical_status.last_backwash_at is None
-            and not self._historical_backfill_complete
-        ):
-            for page in range(1, HISTORICAL_BACKFILL_WEEKS + 1):
-                path = (
-                    f"/pool/{self.pool_id}/historical.data?range=week"
-                    f"&interval=1h&page={page}&{HISTORICAL_ROUTE_QUERY}"
+    async def _get_current_from_pool_data(
+        self,
+    ) -> tuple[
+        str | None,
+        float | None,
+        float | None,
+        str | None,
+    ]:
+        generation = self._current_pool_data_generation
+        async with self._current_pool_data_lock:
+            if generation != self._current_pool_data_generation:
+                return self._current_pool_data
+            try:
+                text = await self._request_text("GET", "/pool.data")
+                update = await asyncio.to_thread(
+                    _extract_current_from_pool_data, text, self.pool_id
                 )
-                try:
-                    older = _extract_historical_status(
-                        await self._request_text_with_reauth("GET", path)
-                    )
-                except SmartPoolConnectError:
-                    _LOGGER.debug(
-                        "Historical backwash scan stopped at week page %s", page,
-                        exc_info=True,
-                    )
-                    break
-                if older.last_backwash_at is not None:
-                    self._merge_historical_status(
-                        PoolHistoricalStatus(
-                            last_backwash_at=older.last_backwash_at
-                        )
-                    )
-                    break
-            self._historical_backfill_complete = True
+                self._current_pool_data = tuple(
+                    new if new is not None else old
+                    for new, old in zip(update, self._current_pool_data, strict=True)
+                )
+            except SmartPoolConnectError:
+                _LOGGER.debug("Could not read /pool.data; keeping cache", exc_info=True)
+            except Exception:
+                _LOGGER.debug("Could not parse /pool.data; keeping cache", exc_info=True)
+            finally:
+                self._current_pool_data_generation += 1
+            return self._current_pool_data
 
-        self._historical_cached_at = now
-        return self._historical_status
+    async def _get_ph_page_flow_status(self) -> str | None:
+        """Read the current pH flow badge from the full server-rendered page."""
 
-    async def _get_current_from_pool_data(self) -> tuple[str | None, float | None, float | None]:
-        try:
-            text = await self._request_text("GET", "/pool.data")
-        except SmartPoolConnectError:
-            _LOGGER.debug("Could not read /pool.data", exc_info=True)
-            return None, None, None
-        return _extract_current_from_pool_data(text, self.pool_id)
+        generation = self._ph_page_flow_generation
+        async with self._ph_page_flow_lock:
+            if generation != self._ph_page_flow_generation:
+                return self._ph_page_flow_status
+            try:
+                document = await self._request_text_with_reauth(
+                    "GET", f"/pool/{self.pool_id}/ph"
+                )
+                update = await asyncio.to_thread(
+                    _extract_ph_page_flow_status, document
+                )
+                if update is not None:
+                    self._ph_page_flow_status = update
+            except SmartPoolConnectError:
+                _LOGGER.debug(
+                    "Could not read the full pH page document; keeping cache",
+                    exc_info=True,
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "Could not parse the full pH page document; keeping cache",
+                    exc_info=True,
+                )
+            finally:
+                self._ph_page_flow_generation += 1
+            return self._ph_page_flow_status
+
+    async def _get_cl_page_flow_status(self) -> str | None:
+        """Read the current Cl flow badge from the full server-rendered page."""
+
+        generation = self._cl_page_flow_generation
+        async with self._cl_page_flow_lock:
+            if generation != self._cl_page_flow_generation:
+                return self._cl_page_flow_status
+            try:
+                document = await self._request_text_with_reauth(
+                    "GET", f"/pool/{self.pool_id}/cl"
+                )
+                update = await asyncio.to_thread(
+                    _extract_cl_page_flow_status, document
+                )
+                if update is not None:
+                    self._cl_page_flow_status = update
+            except SmartPoolConnectError:
+                _LOGGER.debug(
+                    "Could not read the full Cl page document; keeping cache",
+                    exc_info=True,
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "Could not parse the full Cl page document; keeping cache",
+                    exc_info=True,
+                )
+            finally:
+                self._cl_page_flow_generation += 1
+            return self._cl_page_flow_status
 
     async def async_get_ph_settings(self, *, force_refresh: bool = False) -> PoolPhSettings:
         try:
@@ -2268,6 +2940,26 @@ class SmartPoolConnectClient:
     async def async_start_backwash(self) -> None:
         await self._request_json("POST", f"/pool/{self.pool_id}/cmd.data", data={"exec": "backwash"}, headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
         self._invalidate_settings_cache()
+
+    async def async_start_cl_shock(self) -> None:
+        """Request Cl shock treatment without changing the filter pump state."""
+
+        await self._request_json(
+            "POST",
+            f"/pool/{self.pool_id}/cmd.data",
+            data={"exec": "shock_start"},
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        )
+
+    async def async_stop_cl_shock(self) -> None:
+        """Stop a running or pump-waiting Cl shock treatment."""
+
+        await self._request_json(
+            "POST",
+            f"/pool/{self.pool_id}/cmd.data",
+            data={"exec": "shock_stop"},
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        )
 
     async def async_get_eco_valve_settings(self) -> PoolEcoValveSettings:
         try:
@@ -2563,7 +3255,12 @@ class SmartPoolConnectClient:
             f"/api/pool-status/{self.pool_id}"
         )
         pool = pool or {}
-        pool_name, portal_ph, portal_rx = await self._get_current_from_pool_data()
+        (
+            pool_name,
+            portal_ph,
+            portal_rx,
+            portal_cl_shock_status,
+        ) = await self._get_current_from_pool_data()
         (
             ph_settings,
             rx_settings,
@@ -2585,7 +3282,19 @@ class SmartPoolConnectClient:
             _LOGGER.debug("Could not read pool route diagnostics", exc_info=True)
             pool_route = None
         system_details = _extract_system_details(pool_route, self.pool_id)
+        route_api_version = _extract_api_version(pool_route, self.pool_id)
+        if route_api_version is not None:
+            self._pool_route_api_version = route_api_version
+        api_version = self._pool_route_api_version
         historical = await self.async_get_historical_status()
+        ph_dosing_flow_status = await self._get_ph_page_flow_status()
+        cl_dosing_flow_status = await self._get_cl_page_flow_status()
+        cl_shock_status = (
+            _cl_shock_state(live)
+            or _cl_shock_state(v3)
+            or _cl_shock_state(pool_route)
+            or portal_cl_shock_status
+        )
 
         capabilities = {
             name
@@ -2616,6 +3325,12 @@ class SmartPoolConnectClient:
             capabilities.add("v3_live_api")
         if historical.available:
             capabilities.add("historical_data")
+        if rx_settings.detected or cl_shock_status is not None:
+            capabilities.add("cl_shock")
+        if ph_dosing_flow_status is not None:
+            capabilities.add("ph_dosing_flow")
+        if cl_dosing_flow_status is not None:
+            capabilities.add("cl_dosing_flow")
 
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
@@ -2778,6 +3493,9 @@ class SmartPoolConnectClient:
                 if dosing_timings_ms
                 else rx_settings.pausing_time
             ),
+            cl_shock_status=cl_shock_status,
+            ph_dosing_flow_status=ph_dosing_flow_status,
+            cl_dosing_flow_status=cl_dosing_flow_status,
             lighting_on=lighting_on,
             lighting_always_active=lighting_settings.always_active,
             lighting_cover_disabled=lighting_settings.cover_disabled,
@@ -2871,6 +3589,7 @@ class SmartPoolConnectClient:
             main_version=system_details["main_version"],
             io_version=system_details["io_version"],
             deck_version=system_details["deck_version"],
+            api_version=api_version,
             ambient_temperature=historical.ambient_temperature,
             system_temperature_imx=historical.system_temperature_imx,
             system_temperature_main=historical.system_temperature_main,

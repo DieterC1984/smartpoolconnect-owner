@@ -170,8 +170,6 @@ class SmartPoolSelect(SmartPoolConnectEntity, SelectEntity):
     def __init__(self, coordinator, description: SmartPoolSelectDescription) -> None:
         super().__init__(coordinator, description.key)
         self.entity_description = description
-        if description.key.startswith("temperature_"):
-            self._attr_translation_key = None
         self._attr_name = NAMES[description.key]
 
     @property

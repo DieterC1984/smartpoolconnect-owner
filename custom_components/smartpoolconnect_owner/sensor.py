@@ -67,6 +67,35 @@ SENSORS = (
         value_fn=lambda s: s.pump_speed,
     ),
     SmartPoolSensorDescription(
+        key="cl_shock_status",
+        translation_key="cl_shock_status",
+        icon="mdi:flask-outline",
+        device_class=SensorDeviceClass.ENUM,
+        options=["idle", "waiting_for_pump", "active"],
+        value_fn=lambda s: s.cl_shock_status,
+        capabilities=("cl_shock",),
+    ),
+    SmartPoolSensorDescription(
+        key="ph_dosing_flow_status",
+        translation_key="ph_dosing_flow_status",
+        icon="mdi:water-check-outline",
+        device_class=SensorDeviceClass.ENUM,
+        options=["flow_ok", "no_flow"],
+        value_fn=lambda s: s.ph_dosing_flow_status,
+        capabilities=("ph_dosing_flow",),
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
+        key="cl_dosing_flow_status",
+        translation_key="cl_dosing_flow_status",
+        icon="mdi:water-check-outline",
+        device_class=SensorDeviceClass.ENUM,
+        options=["flow_ok", "no_flow"],
+        value_fn=lambda s: s.cl_dosing_flow_status,
+        capabilities=("cl_dosing_flow",),
+        require_value=True,
+    ),
+    SmartPoolSensorDescription(
         key="ph_dosing_time_readonly",
         icon="mdi:timer-outline",
         native_unit_of_measurement="s",
@@ -288,6 +317,12 @@ SENSORS = (
         value_fn=lambda s: s.deck_version,
         require_value=True,
     ),
+    SmartPoolSensorDescription(
+        key="api_version",
+        icon="mdi:api",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.api_version,
+    ),
 )
 
 
@@ -356,13 +391,16 @@ class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):
             self._attr_translation_key = None
         self._attr_name = {
             "ph": "pH",
-            "rx": "Redox (Rx)",
+            "rx": "Cl (Rx)",
             "water_temperature": "Water Temperature",
             "pump_speed": "Pump Speed",
+            "cl_shock_status": "Cl Shock Treatment Status",
+            "ph_dosing_flow_status": "pH Dosing Flow Status",
+            "cl_dosing_flow_status": "Cl Dosing Flow Status",
             "ph_dosing_time_readonly": "pH Dosing Time",
             "ph_pausing_time_readonly": "pH Pause Time",
-            "rx_dosing_time_readonly": "Rx Dosing Time",
-            "rx_pausing_time_readonly": "Rx Pause Time",
+            "rx_dosing_time_readonly": "Cl (Rx) Dosing Time",
+            "rx_pausing_time_readonly": "Cl (Rx) Pause Time",
             "cover_state": "Cover State",
             "covco_cover_position": "Covco Cover Position",
             "phnix_setpoint": "PHNIX Setpoint",
@@ -385,6 +423,7 @@ class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):
             "main_version": "MAIN Version",
             "io_version": "IO Version",
             "deck_version": "DECK Version",
+            "api_version": "API Version",
         }[description.key]
 
     @property
@@ -405,7 +444,21 @@ class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Expose the reliable date while avoiding false clock precision."""
+        """Expose useful context without changing Home Assistant-native states."""
+
+        if self.entity_description.key == "cl_shock_status":
+            if (
+                self.coordinator.data is not None
+                and self.coordinator.data.cl_shock_status == "waiting_for_pump"
+            ):
+                return {
+                    "waiting_behavior": (
+                        "The Cl shock treatment will start automatically when "
+                        "the filter pump starts. The integration does not start "
+                        "the pump."
+                    )
+                }
+            return None
 
         if (
             self.entity_description.key != "last_backwash"
