@@ -29,7 +29,12 @@ The integration was originally developed and tested with the EPS Nexus Full Cont
 
 ## Features
 
-The exact entities available in Home Assistant depend on the equipment and capabilities detected for your pool.
+The exact entities available in Home Assistant depend on the equipment and
+capabilities detected for your pool.
+
+SmartPoolConnect Owner supports different SmartPoolConnect controller
+generations and does not assume that every pool exposes the same hardware,
+API or configuration.
 
 
 ### Monitoring
@@ -39,15 +44,21 @@ Depending on the installation:
 - Pool online status
 - Water temperature
 - Ambient temperature
+- System temperature IMX
+- System temperature MAIN
 - pH value
-- Rx / ORP value
+- Cl (Rx) / ORP value
+- pH dosing flow status
+- Cl dosing flow status
 - Heating status
 - Filter pump status
 - Pump speed
 - Cover state
 - Cover position
 - PHNIX heat-pump telemetry
-- Additional controller diagnostics
+- Last Backwash
+- API Version
+- Controller and firmware diagnostics
 
 
 ### Water Treatment
@@ -57,15 +68,49 @@ Supported configurations can expose:
 - pH target
 - pH dosing time
 - pH pause time
-- Rx / ORP target
-- Rx dosing time
-- Rx pause time
+- pH dosing flow status
+- Cl (Rx) target
+- Cl (Rx) dosing time
+- Cl (Rx) pause time
+- Cl dosing flow status
 
-For compatible V3 controllers, confirmed setpoint writes are supported through the SmartPoolConnect dosing configuration API.
+For compatible V3 controllers, confirmed setpoint writes are supported through
+the SmartPoolConnect dosing configuration API.
 
-Some V3 controllers report dosing and pause times in milliseconds. These values are normalized for display in Home Assistant where detected.
+Some V3 controllers report dosing and pause times in milliseconds. These values
+are normalized for display in Home Assistant where detected.
 
-Write support for dosing/pause timings is only enabled where the API contract has been confirmed.
+Write support for dosing and pause timings is only enabled where the API
+contract has been confirmed.
+
+Dosing flow status is read from the corresponding SmartPoolConnect dosing
+information and is not inferred from the filter pump state.
+
+
+### Cl Shock Treatment
+
+Supported installations can expose Cl Shock Treatment controls and status.
+
+Available functionality includes:
+
+- Cl Shock Treatment Status
+- Start Cl Shock Treatment
+- Stop Cl Shock Treatment
+
+Confirmed treatment states include:
+
+- Idle
+- Waiting for Filter Pump
+- Active
+
+When a Cl Shock Treatment is started while the filter pump is stopped,
+SmartPoolConnect may keep the treatment waiting until the filter pump starts.
+
+SmartPoolConnect Owner does not automatically start the filter pump.
+
+After a Start or Stop command, the integration performs an additional status
+refresh after approximately 5 seconds so the Cl Shock state is reflected in
+Home Assistant more quickly.
 
 
 ### Filtration
@@ -74,14 +119,17 @@ Depending on the controller:
 
 - Filter pump control
 - Pump status
+- Pump speed
 - Pump speed configuration
-- Up to 3 filter schedules
+- Up to 3 configurable filter schedules
 - Schedule enable/disable
 - Weekday selection per schedule
 - Schedule start and stop times
 
-> [!NOTE]
-> Pump-speed mappings can differ between controller generations. Additional V3 mappings are still being validated during the beta.
+Pump-speed mappings can differ between controller generations.
+
+Only confirmed mappings are used. Unknown controller-specific values are not
+guessed.
 
 
 ### Backwash
@@ -89,13 +137,19 @@ Depending on the controller:
 Supported installations can expose:
 
 - Backwash scheduling
-- Backwash start date
-- Backwash start time
+- Backwash start date and time
 - Backwash interval
 - Backwash duration
 - Rinse duration
 - Backwash pump speed
-- Manual / one-click backwash trigger
+- Manual / one-click Backwash trigger
+- Last Backwash
+
+Last Backwash is derived from SmartPoolConnect historical data.
+
+The historical API uses aggregated time buckets, so the integration focuses on
+the confirmed backwash date rather than presenting an imprecise bucket time as
+the exact physical start time.
 
 
 ### Cover Control
@@ -115,8 +169,11 @@ Some SmartPoolConnect installations expose their internal cover through
 `covco_data`. SmartPoolConnect itself refers to this as the
 **internal / Covco cover**.
 
-Where this telemetry is available, SmartPoolConnect Owner can use it for
-cover state, position and control.
+Where this telemetry is available, SmartPoolConnect Owner can use it for cover
+state, encoder-based position and control.
+
+The integration deliberately does not reproduce the SmartPoolConnect
+`cover-protect` sampling or baseline-learning workflow.
 
 
 ### Heating and Temperature Control
@@ -129,6 +186,9 @@ Depending on the installation:
 - Cooling period
 - Water temperature offset
 - Ambient temperature offset
+- Ambient temperature
+- System temperature IMX
+- System temperature MAIN
 
 Compatible PHNIX-equipped installations can additionally expose:
 
@@ -141,6 +201,12 @@ Compatible PHNIX-equipped installations can additionally expose:
 - Sub-mode
 - Error information
 - Failure information
+
+System and ambient temperatures available through SmartPoolConnect historical
+data can also be exposed in Home Assistant.
+
+MAIN system temperature is normalized from the controller's raw representation
+to degrees Celsius.
 
 
 ### Eco Valve
@@ -160,7 +226,7 @@ On installations exposing Zero-E functionality:
 - Enable threshold
 - Disable threshold
 - Target temperature
-- Related Zero-E status/configuration
+- Related Zero-E status and configuration
 
 
 ### Lighting
@@ -174,6 +240,43 @@ Depending on the controller:
 - Monday-Sunday schedule selection
 - Disable lighting when external/deck cover is closed
 - Disable lighting when internal/Covco cover is closed
+
+On compatible V3 controllers, lighting configuration is represented by a
+bitmask.
+
+SmartPoolConnect Owner uses read-modify-write handling so changing the lighting
+state does not overwrite unrelated lighting and cover settings.
+
+
+### Controller Diagnostics
+
+Depending on the controller and available SmartPoolConnect data:
+
+- API Version
+- GUI Version
+- MAIN Version
+- IO Version
+- DECK Version
+- Controller/system temperatures
+- Additional controller diagnostics
+
+API Version is exposed as diagnostic information, for example:
+
+- `v2`
+- `v3`
+
+The reported API version is not used to hard-code which live endpoint a pool
+must use. SmartPoolConnect Owner keeps its capability-driven approach and
+supports the available SmartPoolConnect data sources independently.
+
+
+### Language Support
+
+SmartPoolConnect Owner currently includes translations for:
+
+- English
+- Dutch
+- German
 
 On compatible V3 controllers, lighting configuration is represented by a bitmask. SmartPoolConnect Owner preserves unrelated lighting flags when changing the on/off state instead of overwriting the complete configuration.
 
