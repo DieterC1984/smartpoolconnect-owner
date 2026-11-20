@@ -384,7 +384,8 @@ The exact entities available depend on your controller, installed equipment and 
 <img width="265" height="1164" alt="image" src="https://github.com/user-attachments/assets/c6338fed-0d72-4ee0-8246-b8abc42900ec" />
 <img width="263" height="1209" alt="image" src="https://github.com/user-attachments/assets/dd85a6ba-74a5-4008-91f8-c642a5b0105a" />
 <img width="268" height="1225" alt="image" src="https://github.com/user-attachments/assets/6c12cc95-fd31-4267-aadf-e7dd1f359dce" />
-<img width="270" height="736" alt="image" src="https://github.com/user-attachments/assets/22b7ff36-c60a-4bab-9b95-05884d4dcaba" />
+<img width="268" height="737" alt="image" src="https://github.com/user-attachments/assets/596476e2-3d9b-49b7-9d69-88f6edf3fcea" />
+
 
 
 ## Beta testing
