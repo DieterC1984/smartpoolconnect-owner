@@ -50,7 +50,12 @@ NAMES = {
 }
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
-    async_add_entities(SmartPoolDate(entry.runtime_data, d) for d in DATES)
+    capabilities = entry.runtime_data.data.capabilities if entry.runtime_data.data else frozenset()
+    async_add_entities(
+        SmartPoolDate(entry.runtime_data, d)
+        for d in DATES
+        if "backwash" in capabilities
+    )
 class SmartPoolDate(SmartPoolConnectEntity, DateEntity):
     def __init__(self, coordinator, description):
         super().__init__(coordinator, description.key); self.entity_description=description; self._attr_name=NAMES[description.key]; self._pending_value=None; self._pending_until=None

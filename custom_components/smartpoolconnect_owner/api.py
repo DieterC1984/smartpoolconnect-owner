@@ -618,28 +618,93 @@ def _column_values(block: dict[str, Any] | None) -> dict[str, Any]:
     return values
 
 
-def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
-    """Return validated Covco presence, position percentage, and endpoint state.
+def _validated_runtime_block(
+    data: Any,
+    name: str,
+    required_fields: set[str],
+) -> dict[str, Any] | None:
+    """Return a named V3 runtime block when its semantic schema is present.
 
-    Position is derived only from the encoder endpoints supplied by the
-    controller.  Intermediate ``position_state`` values are intentionally not
-    interpreted until captures for all states are available.
+    Controller ``control`` values are deliberately not interpreted here. Real
+    V3 captures use negative values for working modules, so module detection is
+    based on the module-specific fields instead of a generic status/control
+    sentinel.
+    """
+
+    block = _find_data_block(data, name)
+    values = _column_values(block)
+    return values if required_fields.issubset(values) else None
+
+
+def _backwash_runtime_capability(data: Any) -> bool:
+    """Return whether V3 data proves a controllable backwash module exists."""
+
+    values = _validated_runtime_block(
+        data,
+        "backwash_data",
+        {"state", "manual_start", "manual_stop"},
+    )
+    if values is None:
+        return False
+    return all(
+        values[field] is None or isinstance(values[field], bool)
+        for field in ("manual_start", "manual_stop")
+    )
+
+
+def _lighting_runtime_capability(data: Any) -> bool:
+    """Return whether V3 lighting telemetry/commands prove module presence."""
+
+    values = _validated_runtime_block(
+        data,
+        "lighting_data",
+        {"active", "cmd_next", "cmd_reset", "cmd_preset"},
+    )
+    if values is None:
+        return False
+    return all(
+        values[field] is None or isinstance(values[field], bool)
+        for field in ("cmd_next", "cmd_reset", "cmd_preset")
+    )
+
+
+def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
+    """Return proven Covco presence, position percentage, and endpoint state.
+
+    Capability detection requires the validated encoder endpoints and the
+    confirmed Open/Close/Stop command fields. ``current_location`` is runtime
+    telemetry and may legitimately be ``None`` during an early refresh; in
+    that case the module remains present while position/state stay unknown.
+    Intermediate ``position_state`` values are intentionally not interpreted
+    until captures for all states are available.
     """
 
     values = _column_values(_find_data_block(data, "covco_data"))
     open_location = _as_finite_float(values.get("open_location"))
     close_location = _as_finite_float(values.get("close_location"))
-    current_location = _as_finite_float(values.get("current_location"))
     hysteresis = _as_finite_float(values.get("hys_location"))
+    command_fields = {
+        "automatic_movement_open",
+        "automatic_movement_close",
+        "automatic_movement_stop",
+    }
     if (
         open_location is None
         or close_location is None
-        or current_location is None
         or hysteresis is None
         or hysteresis < 0
         or math.isclose(open_location, close_location)
+        or not command_fields.issubset(values)
+        or any(
+            values[field] is not None and not isinstance(values[field], bool)
+            for field in command_fields
+        )
     ):
         return False, None, None
+
+    current_location = _as_finite_float(values.get("current_location"))
+    if current_location is None:
+        return True, None, None
 
     span = open_location - close_location
     position = max(0.0, min(100.0, (current_location - close_location) / span * 100.0))
@@ -659,17 +724,31 @@ def _covco_telemetry_with_fallback(
 ) -> tuple[bool, float | None, str | None]:
     """Read Covco telemetry from all confirmed sources in priority order."""
 
+    detected = False
     for source in (live, v3, pool_route):
         telemetry = _covco_telemetry(source)
         if telemetry[0]:
-            return telemetry
-    return False, None, None
+            detected = True
+            if telemetry[1] is not None or telemetry[2] is not None:
+                return telemetry
+    return detected, None, None
 
 
 def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
-    """Return PHNIX telemetry only when the block contains real measurements."""
+    """Return PHNIX telemetry when its schema has at least one usable value.
 
-    values = _column_values(_find_data_block(data, "temperature_phnx_data"))
+    Individual readings are allowed to be temporarily missing. Once the
+    module is proven, Home Assistant can create all PHNIX entities and expose
+    missing readings as Unknown until a later refresh supplies them.
+    """
+
+    values = _validated_runtime_block(
+        data,
+        "temperature_phnx_data",
+        {"sp", "inlet", "outlet"},
+    )
+    if values is None:
+        return False, {}
     telemetry: dict[str, float | int | None] = {
         "setpoint": _as_finite_float(values.get("sp")),
         "inlet": _as_finite_float(values.get("inlet")),
@@ -681,16 +760,36 @@ def _phnix_telemetry(data: Any) -> tuple[bool, dict[str, float | int | None]]:
         "error": _as_int(values.get("err")),
         "fail_0": _as_int(values.get("fail_0")),
     }
-    temperatures = tuple(
-        telemetry[key] for key in ("setpoint", "inlet", "outlet", "coil", "ambient")
-    )
-    valid = (
-        telemetry["setpoint"] is not None
-        and telemetry["inlet"] is not None
-        and telemetry["outlet"] is not None
-        and any(value not in (None, 0, 0.0) for value in temperatures)
-    )
+    valid = any(value is not None for value in telemetry.values())
     return valid, telemetry if valid else {}
+
+
+def _phnix_telemetry_with_fallback(
+    *sources: Any,
+) -> tuple[bool, dict[str, float | int | None]]:
+    """Merge PHNIX fields without letting one temporary null hide another source."""
+
+    merged: dict[str, float | int | None] = {
+        "setpoint": None,
+        "inlet": None,
+        "outlet": None,
+        "coil": None,
+        "ambient": None,
+        "mode": None,
+        "sub_mode": None,
+        "error": None,
+        "fail_0": None,
+    }
+    detected = False
+    for source in sources:
+        source_detected, telemetry = _phnix_telemetry(source)
+        if not source_detected:
+            continue
+        detected = True
+        for key, value in telemetry.items():
+            if merged[key] is None and value is not None:
+                merged[key] = value
+    return detected, merged if detected else {}
 
 
 def _analogue_telemetry(data: Any) -> dict[str, float | None]:
@@ -2083,9 +2182,11 @@ class SmartPoolConnectClient:
         self._current_pool_data_generation = 0
         self._current_pool_data_lock = asyncio.Lock()
         self._ph_page_flow_status: str | None = None
+        self._ph_page_flow_detected = False
         self._ph_page_flow_generation = 0
         self._ph_page_flow_lock = asyncio.Lock()
         self._cl_page_flow_status: str | None = None
+        self._cl_page_flow_detected = False
         self._cl_page_flow_generation = 0
         self._cl_page_flow_lock = asyncio.Lock()
         self._settings_bundle: tuple[Any, ...] | None = None
@@ -2602,6 +2703,9 @@ class SmartPoolConnectClient:
                 update = await asyncio.to_thread(
                     _extract_ph_page_flow_status, document
                 )
+                # A successful authenticated module page proves capability even
+                # when its first rendered live badge is temporarily absent.
+                self._ph_page_flow_detected = True
                 if update is not None:
                     self._ph_page_flow_status = update
             except SmartPoolConnectError:
@@ -2632,6 +2736,7 @@ class SmartPoolConnectClient:
                 update = await asyncio.to_thread(
                     _extract_cl_page_flow_status, document
                 )
+                self._cl_page_flow_detected = True
                 if update is not None:
                     self._cl_page_flow_status = update
             except SmartPoolConnectError:
@@ -3327,9 +3432,9 @@ class SmartPoolConnectClient:
             capabilities.add("historical_data")
         if rx_settings.detected or cl_shock_status is not None:
             capabilities.add("cl_shock")
-        if ph_dosing_flow_status is not None:
+        if self._ph_page_flow_detected and ph_settings.detected:
             capabilities.add("ph_dosing_flow")
-        if cl_dosing_flow_status is not None:
+        if self._cl_page_flow_detected and rx_settings.detected:
             capabilities.add("cl_dosing_flow")
 
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
@@ -3343,28 +3448,38 @@ class SmartPoolConnectClient:
         standard_cover_state = _cover_state(
             _find_key(live, {"cover"}) if live is not None else None
         )
-        covco_valid, covco_position, covco_state = _covco_telemetry_with_fallback(
+        covco_detected, covco_position, covco_state = _covco_telemetry_with_fallback(
             live,
             v3,
             pool_route,
         )
-        phnix_valid, phnix = _phnix_telemetry(v3)
-        if not phnix_valid:
-            phnix_valid, phnix = _phnix_telemetry(live)
+        phnix_valid, phnix = _phnix_telemetry_with_fallback(v3, live)
         v3_pump_status, v3_pump_speed = _v3_filter_telemetry(v3)
         v3_lighting = _v3_lighting_state(v3)
+        backwash_runtime_detected = any(
+            _backwash_runtime_capability(source)
+            for source in (v3, live, pool_route)
+        )
+        lighting_runtime_detected = any(
+            _lighting_runtime_capability(source)
+            for source in (v3, live, pool_route)
+        )
 
         if standard_cover_state is not None:
             capabilities.add("cover_status")
-        if covco_valid:
+        if covco_detected:
             capabilities.add("covco_cover")
-        if cover_settings.valid or covco_valid:
+        if cover_settings.valid or covco_detected:
             capabilities.add("cover_control")
         if phnix_valid:
             capabilities.add("phnix_heat_pump")
+        if backwash_runtime_detected:
+            capabilities.add("backwash")
+        if lighting_runtime_detected:
+            capabilities.add("lighting")
         if lighting_settings.source == "v3":
             capabilities.add("lighting_v3")
-        if _find_data_block(v3, "lighting_data") is not None:
+        if lighting_runtime_detected:
             capabilities.add("v3_lighting")
 
         raw_dosing_durations = (
@@ -3380,6 +3495,10 @@ class SmartPoolConnectClient:
         if dosing_timings_ms:
             capabilities.add("dosing_timing_ms")
 
+        # Hardware capabilities do not disappear because one later refresh has
+        # a temporary null runtime value. Keep everything once proven by a
+        # module-specific contract.
+        capabilities.update(self._last_capabilities)
         frozen_capabilities = frozenset(capabilities)
         self._last_capabilities = frozen_capabilities
 

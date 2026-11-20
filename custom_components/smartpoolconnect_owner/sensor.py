@@ -334,10 +334,14 @@ def _is_supported(
 
     if status is None:
         return not description.capabilities and not description.require_value
-    if description.capabilities and not any(
-        capability in status.capabilities for capability in description.capabilities
-    ):
-        return False
+    if description.capabilities:
+        # Capability is structural; a temporarily missing current reading must
+        # not suppress entity creation. Its native value will remain None and
+        # Home Assistant will report Unknown until data arrives.
+        return any(
+            capability in status.capabilities
+            for capability in description.capabilities
+        )
     return not description.require_value or description.value_fn(status) is not None
 
 

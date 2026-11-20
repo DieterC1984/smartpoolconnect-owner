@@ -153,6 +153,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
         for description in NUMBERS
         if (
             (not description.key.startswith("zero_e_") or "zero_e" in capabilities)
+            and (
+                not description.key.startswith("backwash_")
+                or "backwash" in capabilities
+            )
             and not (
                 "dosing_timing_ms" in capabilities
                 and description.key in timing_keys

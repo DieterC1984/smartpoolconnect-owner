@@ -17,10 +17,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up command buttons from detected controller capabilities."""
 
-    entities: list[ButtonEntity] = [StartBackwashButton(entry.runtime_data)]
     capabilities = (
         entry.runtime_data.data.capabilities if entry.runtime_data.data else frozenset()
     )
+    entities: list[ButtonEntity] = []
+    if "backwash" in capabilities:
+        entities.append(StartBackwashButton(entry.runtime_data))
     if "cl_shock" in capabilities:
         entities.extend(
             (
