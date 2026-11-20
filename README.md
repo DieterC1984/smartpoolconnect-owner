@@ -381,7 +381,10 @@ SmartPoolConnect Owner uses standard Home Assistant entity platforms, including 
 
 The exact entities available depend on your controller, installed equipment and SmartPoolConnect configuration.
 
-<img width="447" height="1251" alt="SmartPoolConnect Owner entities in Home Assistant" src="https://github.com/user-attachments/assets/b0778da4-7e39-4074-80ab-c0673aaeacbe" />
+<img width="265" height="1164" alt="image" src="https://github.com/user-attachments/assets/c6338fed-0d72-4ee0-8246-b8abc42900ec" />
+<img width="263" height="1209" alt="image" src="https://github.com/user-attachments/assets/dd85a6ba-74a5-4008-91f8-c642a5b0105a" />
+<img width="268" height="1225" alt="image" src="https://github.com/user-attachments/assets/6c12cc95-fd31-4267-aadf-e7dd1f359dce" />
+<img width="270" height="736" alt="image" src="https://github.com/user-attachments/assets/22b7ff36-c60a-4bab-9b95-05884d4dcaba" />
 
 
 ## Beta testing
