@@ -270,6 +270,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
                 or "lighting_v3" in capabilities
             )
             and (
+                description.key != "lighting"
+                or "lighting_v3" not in capabilities
+            )
+            and (
                 description.key not in COVER_SETTING_KEYS
                 or "cover" in capabilities
             )

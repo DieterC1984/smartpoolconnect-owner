@@ -67,9 +67,10 @@ HISTORICAL_BACKFILL_WEEKS: int = 13
 HISTORICAL_ROUTE_ID = "pool/routes/$pid.historical"
 HISTORICAL_ROUTE_QUERY = "_routes=root%2Cpool%2Froutes%2F%24pid.historical"
 
-# v3 ``lighting_config.enabled`` is a bitmask.  Never replace this value with
-# a literal 1/3: bits 2 and 3 preserve cover-dependent behaviour.
-LIGHTING_POWER_BIT = 0b0010
+# v3 ``lighting_config.enabled`` is an opaque bitmask.  The only confirmed
+# writable flags are the external/deck-cover and internal/Covco-cover disable
+# flags.  Preserve every other bit with read-modify-write; in particular, do
+# not infer a physical lighting ON/OFF command from this field.
 LIGHTING_EXTERNAL_COVER_BIT = 0b0100
 LIGHTING_INTERNAL_COVER_BIT = 0b1000
 
@@ -1723,6 +1724,7 @@ def _extract_v3_lighting_settings(data: Any) -> PoolLightingSettings:
         return PoolLightingSettings(source="v3")
 
     enabled = _as_int(config.get("enabled"))
+    explicit_schedule_enabled = _as_bool(config.get("s1_enabled"))
     start_hour = _as_int(config.get("s1_hour_start"))
     start_minute = _as_int(config.get("s1_min_start"))
     stop_hour = _as_int(config.get("s1_hour_stop"))
@@ -1749,8 +1751,17 @@ def _extract_v3_lighting_settings(data: Any) -> PoolLightingSettings:
         missing.append("s1_min_stop")
     missing = sorted(set(missing))
     valid = not missing
+    schedule_enabled = (
+        explicit_schedule_enabled
+        if explicit_schedule_enabled is not None
+        else bool(days)
+        if days is not None
+        else None
+    )
     return PoolLightingSettings(
-        always_active=bool(enabled & LIGHTING_POWER_BIT) if enabled is not None else None,
+        # The V3 traces do not confirm a physical light ON/OFF write contract.
+        # Runtime light state may still be read from validated live telemetry.
+        always_active=None,
         cover_disabled=(
             bool(enabled & LIGHTING_EXTERNAL_COVER_BIT)
             if enabled is not None
@@ -1761,7 +1772,7 @@ def _extract_v3_lighting_settings(data: Any) -> PoolLightingSettings:
             if enabled is not None
             else None
         ),
-        schedule_enabled=bool(days) if days is not None else None,
+        schedule_enabled=schedule_enabled,
         schedule_start_time=(
             f"{start_hour:02d}:{start_minute:02d}"
             if start_hour is not None and start_minute is not None
@@ -2927,9 +2938,12 @@ class SmartPoolConnectClient:
                 raise SmartPoolConnectError(
                     "Lighting update aborted because the current enabled bitmask is unavailable"
                 )
+            if always_active is not None:
+                raise SmartPoolConnectError(
+                    "V3 physical lighting ON/OFF control is unavailable because its request contract is unconfirmed"
+                )
             enabled = current.enabled_mask
             for requested, bit in (
-                (always_active, LIGHTING_POWER_BIT),
                 (cover_disabled, LIGHTING_EXTERNAL_COVER_BIT),
                 (internal_cover_disabled, LIGHTING_INTERNAL_COVER_BIT),
             ):
@@ -2939,34 +2953,44 @@ class SmartPoolConnectClient:
                     enabled &= ~bit
 
             days = current.schedule_days if schedule_days is None else schedule_days
-            if schedule_enabled is False:
-                days = ()
-            elif schedule_enabled is True and not days:
-                raise SmartPoolConnectError(
-                    "Select at least one lighting schedule day before enabling the schedule"
-                )
             if any(day not in DAYS for day in days):
                 raise SmartPoolConnectError("Lighting schedule contains an invalid weekday")
 
-            start = schedule_start_time or current.schedule_start_time
-            stop = schedule_stop_time or current.schedule_stop_time
-            if _valid_time(start) is None or _valid_time(stop) is None:
-                raise SmartPoolConnectError(
-                    "Lighting update aborted because a schedule time is invalid"
+            payload: dict[str, Any] = {}
+            if cover_disabled is not None or internal_cover_disabled is not None:
+                payload["enabled"] = enabled
+            if schedule_enabled is not None:
+                # Confirmed independent weekly-schedule enable write.  Do not
+                # clear or rewrite s1_days when this switch is turned off.
+                payload["s1_enabled"] = schedule_enabled
+            if schedule_start_time is not None:
+                if _valid_time(schedule_start_time) is None:
+                    raise SmartPoolConnectError(
+                        "Lighting update aborted because the schedule start time is invalid"
+                    )
+                start_hour, start_minute = (
+                    int(part) for part in schedule_start_time.split(":")
                 )
-            start_hour, start_minute = (int(part) for part in start.split(":"))
-            stop_hour, stop_minute = (int(part) for part in stop.split(":"))
+                payload["s1_hour_start"] = start_hour
+                payload["s1_min_start"] = start_minute
+            if schedule_stop_time is not None:
+                if _valid_time(schedule_stop_time) is None:
+                    raise SmartPoolConnectError(
+                        "Lighting update aborted because the schedule stop time is invalid"
+                    )
+                stop_hour, stop_minute = (
+                    int(part) for part in schedule_stop_time.split(":")
+                )
+                payload["s1_hour_stop"] = stop_hour
+                payload["s1_min_stop"] = stop_minute
+            if schedule_days is not None:
+                payload["s1_days"] = _days_to_mask(days)
+            if not payload:
+                return
             await self._request_json(
                 "PATCH",
                 f"/api/admin-settings/{self.pool_id}/lighting_config",
-                json={
-                    "enabled": enabled,
-                    "s1_hour_start": start_hour,
-                    "s1_min_start": start_minute,
-                    "s1_days": _days_to_mask(days),
-                    "s1_hour_stop": stop_hour,
-                    "s1_min_stop": stop_minute,
-                },
+                json=payload,
                 headers={"Content-Type": "application/json"},
             )
             self._invalidate_settings_cache()
