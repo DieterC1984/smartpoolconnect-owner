@@ -1,0 +1,198 @@
+name: Bug report
+description: Report a problem with SmartPoolConnect Owner
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue.
+
+        SmartPoolConnect hardware and firmware generations can behave differently.
+        Please provide the system information below so the issue can be reproduced
+        and compared with other installations.
+
+        Do not include passwords, API keys, authentication tokens, cookies,
+        pool GUIDs, MAC addresses or coordinates.
+
+  - type: input
+    id: integration_version
+    attributes:
+      label: SmartPoolConnect Owner version
+      description: The exact version installed in Home Assistant.
+      placeholder: "v1.0.24-beta.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: controller
+    attributes:
+      label: Controller
+      description: Select your controller type.
+      options:
+        - Nexus Full Control
+        - Nexus II
+        - Norsup One
+        - Other
+        - Unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: api_version
+    attributes:
+      label: SmartPoolConnect API Version
+      description: This is available as a diagnostic entity in Home Assistant.
+      options:
+        - v1
+        - v2
+        - v3
+        - Unknown
+    validations:
+      required: true
+
+  - type: input
+    id: carrier_firmware
+    attributes:
+      label: Carrier firmware
+      description: Enter the Carrier firmware version if available.
+      placeholder: "3.1.6 or 3.2.0"
+
+  - type: input
+    id: gui_version
+    attributes:
+      label: GUI version
+      placeholder: "Example: 02R55"
+
+  - type: input
+    id: main_version
+    attributes:
+      label: MAIN version
+      placeholder: "Example: 02R54"
+
+  - type: input
+    id: io_version
+    attributes:
+      label: IO version
+      placeholder: "Example: 02R54"
+
+  - type: input
+    id: deck_version
+    attributes:
+      label: DECK version
+      placeholder: "Example: 02R40"
+
+  - type: checkboxes
+    id: equipment
+    attributes:
+      label: Installed equipment
+      description: Select the equipment physically installed on your pool.
+      options:
+        - label: Variable-speed filter pump
+        - label: pH dosing
+        - label: Cl dosing
+        - label: Lighting
+        - label: Internal / Covco cover
+        - label: External / deck cover
+        - label: PHNIX heat pump
+        - label: Eco Valve
+        - label: Zero-E
+        - label: Flow paddle
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected functionality
+      options:
+        - Setup / Login
+        - Pool status
+        - pH dosing
+        - Cl dosing
+        - Dosing flow
+        - Filter pump
+        - Pump speed
+        - Filter schedules
+        - Backwash
+        - Lighting
+        - Lighting schedules
+        - Cover
+        - Heating / Temperature
+        - PHNIX
+        - Eco Valve
+        - Zero-E
+        - Historical data
+        - Diagnostics
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem description
+      description: Describe exactly what is not working.
+      placeholder: |
+        Example:
+        The pool has lighting installed, but no physical Light ON/OFF control
+        appears in Home Assistant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: smartpoolconnect_behavior
+    attributes:
+      label: SmartPoolConnect web interface behavior
+      description: |
+        Describe what the official SmartPoolConnect web interface shows or does
+        for the same functionality.
+      placeholder: |
+        Example:
+        Switching the light in SmartPoolConnect turns the physical pool light on.
+
+  - type: textarea
+    id: entities
+    attributes:
+      label: Related Home Assistant entities
+      description: List the relevant entity names. Do not include private IDs or credentials.
+      placeholder: |
+        Lighting
+        Lighting Weekly Schedule
+        Lighting Disabled When Internal Cover Closed
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostic data
+      description: |
+        Add relevant debug logs or sanitized API captures if requested.
+
+        Remove:
+        - Pool GUID / Pool ID
+        - Email address
+        - MAC address
+        - Coordinates
+        - Cookies
+        - Authentication tokens
+        - API keys
+      render: shell
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Checklist
+      options:
+        - label: I am using the latest available release or beta.
+          required: true
+        - label: I checked existing issues for the same problem.
+          required: true
+        - label: I removed credentials and personal information from logs and captures.
+          required: true
