@@ -225,6 +225,50 @@
           "flow_ok": "Doorstroming OK",
           "no_flow": "Geen doorstroming"
         }
+      },
+      "v3_flow_paddle_status": {
+        "name": "Status V3-doorstroomschakelaar",
+        "state": {
+          "flow_ok": "Doorstroming OK",
+          "no_flow": "Geen doorstroming"
+        }
+      },
+      "v3_ph_control": {
+        "name": "V3 pH-regelcode"
+      },
+      "v3_cl_control": {
+        "name": "V3 Cl-regelcode"
+      },
+      "carrier_version": {
+        "name": "Carrier-firmwareversie"
+      },
+      "filter_modbus_power": {
+        "name": "Filter Modbus-vermogen"
+      },
+      "filter_modbus_status": {
+        "name": "Filter Modbus-status"
+      },
+      "filter_pump_error": {
+        "name": "Filterpompfout",
+        "state": {
+          "ok": "OK",
+          "error": "Fout"
+        }
+      },
+      "filter_pump_error_code": {
+        "name": "Foutcode filterpomp"
+      },
+      "ph_input_error": {
+        "name": "pH-ingangsfout"
+      },
+      "rx_input_error": {
+        "name": "Cl (Rx)-ingangsfout"
+      },
+      "tds_pollution": {
+        "name": "TDS-vervuiling"
+      },
+      "tds_salt": {
+        "name": "TDS-zout"
       }
     },
     "button": {

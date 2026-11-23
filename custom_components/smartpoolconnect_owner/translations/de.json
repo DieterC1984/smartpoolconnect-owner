@@ -225,6 +225,50 @@
           "flow_ok": "Durchfluss OK",
           "no_flow": "Kein Durchfluss"
         }
+      },
+      "v3_flow_paddle_status": {
+        "name": "Status des V3-Durchflussschalters",
+        "state": {
+          "flow_ok": "Durchfluss OK",
+          "no_flow": "Kein Durchfluss"
+        }
+      },
+      "v3_ph_control": {
+        "name": "V3-pH-Steuercode"
+      },
+      "v3_cl_control": {
+        "name": "V3-Cl-Steuercode"
+      },
+      "carrier_version": {
+        "name": "Carrier-Firmwareversion"
+      },
+      "filter_modbus_power": {
+        "name": "Filter-Modbus-Leistung"
+      },
+      "filter_modbus_status": {
+        "name": "Filter-Modbus-Status"
+      },
+      "filter_pump_error": {
+        "name": "Filterpumpenfehler",
+        "state": {
+          "ok": "OK",
+          "error": "Fehler"
+        }
+      },
+      "filter_pump_error_code": {
+        "name": "Filterpumpen-Fehlercode"
+      },
+      "ph_input_error": {
+        "name": "pH-Eingangsfehler"
+      },
+      "rx_input_error": {
+        "name": "Cl-(Rx)-Eingangsfehler"
+      },
+      "tds_pollution": {
+        "name": "TDS-Verschmutzung"
+      },
+      "tds_salt": {
+        "name": "TDS-Salz"
       }
     },
     "button": {
