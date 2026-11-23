@@ -225,6 +225,50 @@
           "flow_ok": "Flow OK",
           "no_flow": "No flow"
         }
+      },
+      "v3_flow_paddle_status": {
+        "name": "V3 flow paddle status",
+        "state": {
+          "flow_ok": "Flow OK",
+          "no_flow": "No flow"
+        }
+      },
+      "v3_ph_control": {
+        "name": "V3 pH control code"
+      },
+      "v3_cl_control": {
+        "name": "V3 Cl control code"
+      },
+      "carrier_version": {
+        "name": "Carrier firmware version"
+      },
+      "filter_modbus_power": {
+        "name": "Filter Modbus power"
+      },
+      "filter_modbus_status": {
+        "name": "Filter Modbus status"
+      },
+      "filter_pump_error": {
+        "name": "Filter pump error",
+        "state": {
+          "ok": "OK",
+          "error": "Error"
+        }
+      },
+      "filter_pump_error_code": {
+        "name": "Filter pump error code"
+      },
+      "ph_input_error": {
+        "name": "pH input error"
+      },
+      "rx_input_error": {
+        "name": "Cl (Rx) input error"
+      },
+      "tds_pollution": {
+        "name": "TDS pollution"
+      },
+      "tds_salt": {
+        "name": "TDS salt"
       }
     },
     "button": {

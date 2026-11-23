@@ -67,12 +67,28 @@ HISTORICAL_BACKFILL_WEEKS: int = 13
 HISTORICAL_ROUTE_ID = "pool/routes/$pid.historical"
 HISTORICAL_ROUTE_QUERY = "_routes=root%2Cpool%2Froutes%2F%24pid.historical"
 
-# v3 ``lighting_config.enabled`` is an opaque bitmask.  The only confirmed
-# writable flags are the external/deck-cover and internal/Covco-cover disable
-# flags.  Preserve every other bit with read-modify-write; in particular, do
-# not infer a physical lighting ON/OFF command from this field.
+# Confirmed v3 ``lighting_config.enabled`` bitmask. Every update must use
+# read-modify-write so changing the physical light does not reset either cover
+# protection flag (and changing a cover flag does not switch the light).
+LIGHTING_ON_BIT = 0b0010
 LIGHTING_EXTERNAL_COVER_BIT = 0b0100
 LIGHTING_INTERNAL_COVER_BIT = 0b1000
+V3_ONLY_DIAGNOSTIC_CAPABILITIES = frozenset(
+    {
+        "v3_flow_paddle",
+        "v3_ph_control",
+        "v3_cl_control",
+        "v3_carrier_version",
+        "v3_filter_modbus_power",
+        "v3_filter_modbus_status",
+        "v3_filter_pump_error",
+        "v3_filter_pump_error_code",
+        "v3_ph_input_error",
+        "v3_rx_input_error",
+        "v3_tds_pollution",
+        "v3_tds_salt",
+    }
+)
 
 
 class SmartPoolConnectError(Exception):
@@ -130,6 +146,18 @@ class PoolStatus:
     cl_shock_status: str | None = None
     ph_dosing_flow_status: str | None = None
     cl_dosing_flow_status: str | None = None
+    v3_flow_paddle_status: str | None = None
+    v3_ph_control: int | None = None
+    v3_cl_control: int | None = None
+    carrier_version: str | None = None
+    filter_modbus_power: float | None = None
+    filter_modbus_status: int | None = None
+    filter_pump_error: str | None = None
+    filter_pump_error_code: int | None = None
+    ph_input_error: int | None = None
+    rx_input_error: int | None = None
+    tds_pollution: float | None = None
+    tds_salt: float | None = None
     lighting_on: bool | None = None
     lighting_always_active: bool | None = None
     lighting_cover_disabled: bool | None = None
@@ -619,6 +647,58 @@ def _column_values(block: dict[str, Any] | None) -> dict[str, Any]:
     return values
 
 
+def _raw_v3_column_value(
+    data: Any, table: str, field: str, expected_type: str
+) -> Any | None:
+    """Return one typed value from a genuine raw V3 table column.
+
+    Nexus Full Control can expose normalized/default fields with familiar names,
+    and unsupported firmware tables can contain null or sentinel values. V3-only
+    diagnostic capabilities must therefore be proven by the exact raw table,
+    column name and firmware type rather than by a normalized ``PoolStatus``
+    attribute or a recursively found default.
+    """
+
+    block = _find_data_block(data, table)
+    if not isinstance(block, dict) or not isinstance(block.get("columns"), list):
+        return None
+    for column in block["columns"]:
+        if not isinstance(column, dict) or column.get("name") != field:
+            continue
+        if column.get("type") != expected_type:
+            return None
+        return column.get("value")
+    return None
+
+
+def _raw_v3_int(
+    data: Any,
+    table: str,
+    field: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    """Return a bounded raw V3 integer, rejecting booleans and sentinels."""
+
+    value = _as_int(_raw_v3_column_value(data, table, field, "number"))
+    return value if value is not None and minimum <= value <= maximum else None
+
+
+def _raw_v3_float(
+    data: Any,
+    table: str,
+    field: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float | None:
+    """Return a bounded raw V3 number, rejecting null/NaN/sentinel values."""
+
+    value = _as_finite_float(_raw_v3_column_value(data, table, field, "number"))
+    return value if value is not None and minimum <= value <= maximum else None
+
+
 def _validated_runtime_block(
     data: Any,
     name: str,
@@ -803,6 +883,121 @@ def _analogue_telemetry(data: Any) -> dict[str, float | None]:
         "water_temperature": _as_finite_float(values.get("water_t")),
         "ambient_temperature": _as_finite_float(values.get("ambient_t")),
     }
+
+
+def _v3_flow_telemetry(data: Any) -> dict[str, Any]:
+    """Return the confirmed raw V3 flow inputs and dosing status values."""
+
+    paddle = _raw_v3_column_value(
+        data, "input_data", "flow_paddle_detect", "boolean"
+    )
+    carrier = _raw_v3_column_value(data, "pool_fw", "carrier_version", "text")
+    carrier = carrier.strip() if isinstance(carrier, str) else None
+    if carrier is not None and not re.fullmatch(
+        r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", carrier
+    ):
+        carrier = None
+    return {
+        "paddle": paddle if isinstance(paddle, bool) else None,
+        # Documented carrier status families occupy a small signed range. The
+        # bound rejects common unsupported integer sentinels without excluding
+        # the confirmed -28/-204 and positive operating states.
+        "ph_control": _raw_v3_int(
+            data, "dosing_data", "ph_control", minimum=-999, maximum=999
+        ),
+        "cl_control": _raw_v3_int(
+            data, "dosing_data", "cl_control", minimum=-999, maximum=999
+        ),
+        "carrier_version": carrier,
+    }
+
+
+def _extract_v3_flow_modes(data: Any) -> tuple[int | None, int | None]:
+    """Return per-channel V3 flow modes from ``dosing_config``.
+
+    Bit 0 confirms that a dosing channel uses the shared flow-paddle input.
+    Keeping this check separate prevents a disconnected or unused paddle from
+    being presented as a channel-specific no-flow alarm.
+    """
+
+    config = _find_config_with_keys(data, {"ph_mode_flow", "cl_mode_flow"})
+    if config is None:
+        return None, None
+    return _as_int(config.get("ph_mode_flow")), _as_int(config.get("cl_mode_flow"))
+
+
+def _v3_channel_flow_status(
+    mode: int | None, paddle: bool | None, control: int | None
+) -> str | None:
+    """Return a channel flow state only when its paddle mode is confirmed."""
+
+    if mode is None or not (mode & 0x01):
+        return None
+    if paddle is True:
+        return "flow_ok"
+    if paddle is False or control in (-28, -204):
+        return "no_flow"
+    return None
+
+
+def _v3_diagnostics(data: Any) -> dict[str, Any]:
+    """Extract capability-driven, read-only diagnostics from V3 live data."""
+
+    error_flag = _raw_v3_int(
+        data, "filter_data", "mb_err_flag", minimum=0, maximum=1
+    )
+    error_code = _raw_v3_int(
+        data, "filter_data", "mb_err_code", minimum=0, maximum=65534
+    )
+    # Treat the pump error pair as one contract. A lone flag or code is not
+    # enough to prove that genuine V3 Modbus pump diagnostics are supported.
+    error_contract_valid = error_flag is not None and error_code is not None
+    return {
+        "filter_modbus_power": _raw_v3_float(
+            data, "filter_data", "mb_watt", minimum=0, maximum=100_000
+        ),
+        "filter_modbus_status": _raw_v3_int(
+            data, "filter_data", "mb_status", minimum=0, maximum=65534
+        ),
+        "filter_pump_error": (
+            "error"
+            if error_contract_valid and error_flag == 1
+            else "ok"
+            if error_contract_valid and error_flag == 0
+            else None
+        ),
+        "filter_pump_error_code": error_code if error_contract_valid else None,
+        "ph_input_error": _raw_v3_int(
+            data, "analoge_data", "ph_input_error", minimum=0, maximum=65534
+        ),
+        "rx_input_error": _raw_v3_int(
+            data, "analoge_data", "rx_input_error", minimum=0, maximum=65534
+        ),
+        "tds_pollution": _raw_v3_float(
+            data, "analoge_data", "tds_pollution", minimum=0, maximum=1_000_000
+        ),
+        "tds_salt": _raw_v3_float(
+            data, "analoge_data", "tds_salt", minimum=0, maximum=1_000_000
+        ),
+    }
+
+
+def _v3_diagnostic_capabilities(
+    flow: dict[str, Any], diagnostics: dict[str, Any]
+) -> set[str]:
+    """Return only capabilities proven by validated raw V3 source fields."""
+
+    capabilities = {
+        f"v3_{key}" for key, value in diagnostics.items() if value is not None
+    }
+    capabilities.update(
+        f"v3_{key}"
+        for key in ("ph_control", "cl_control", "carrier_version")
+        if flow.get(key) is not None
+    )
+    if flow.get("paddle") is not None:
+        capabilities.add("v3_flow_paddle")
+    return capabilities
 
 
 def _v3_filter_telemetry(data: Any) -> tuple[bool | None, str | None]:
@@ -1759,9 +1954,9 @@ def _extract_v3_lighting_settings(data: Any) -> PoolLightingSettings:
         else None
     )
     return PoolLightingSettings(
-        # The V3 traces do not confirm a physical light ON/OFF write contract.
-        # Runtime light state may still be read from validated live telemetry.
-        always_active=None,
+        always_active=(
+            bool(enabled & LIGHTING_ON_BIT) if enabled is not None else None
+        ),
         cover_disabled=(
             bool(enabled & LIGHTING_EXTERNAL_COVER_BIT)
             if enabled is not None
@@ -2938,11 +3133,11 @@ class SmartPoolConnectClient:
                 raise SmartPoolConnectError(
                     "Lighting update aborted because the current enabled bitmask is unavailable"
                 )
-            if always_active is not None:
-                raise SmartPoolConnectError(
-                    "V3 physical lighting ON/OFF control is unavailable because its request contract is unconfirmed"
-                )
             enabled = current.enabled_mask
+            if always_active is True:
+                enabled |= LIGHTING_ON_BIT
+            elif always_active is False:
+                enabled &= ~LIGHTING_ON_BIT
             for requested, bit in (
                 (cover_disabled, LIGHTING_EXTERNAL_COVER_BIT),
                 (internal_cover_disabled, LIGHTING_INTERNAL_COVER_BIT),
@@ -2957,7 +3152,11 @@ class SmartPoolConnectClient:
                 raise SmartPoolConnectError("Lighting schedule contains an invalid weekday")
 
             payload: dict[str, Any] = {}
-            if cover_disabled is not None or internal_cover_disabled is not None:
+            if (
+                always_active is not None
+                or cover_disabled is not None
+                or internal_cover_disabled is not None
+            ):
                 payload["enabled"] = enabled
             if schedule_enabled is not None:
                 # Confirmed independent weekly-schedule enable write.  Do not
@@ -3418,6 +3617,31 @@ class SmartPoolConnectClient:
         historical = await self.async_get_historical_status()
         ph_dosing_flow_status = await self._get_ph_page_flow_status()
         cl_dosing_flow_status = await self._get_cl_page_flow_status()
+        v3_flow = _v3_flow_telemetry(v3)
+        v3_diagnostics = _v3_diagnostics(v3)
+        current_v3_diagnostic_capabilities = _v3_diagnostic_capabilities(
+            v3_flow, v3_diagnostics
+        )
+        dosing_config = (
+            await self._get_admin_config("dosing_config") if v3 is not None else None
+        )
+        ph_mode_flow, cl_mode_flow = _extract_v3_flow_modes(dosing_config)
+
+        # The paddle is authoritative only for channels whose mode explicitly
+        # enables it. If the live paddle is temporarily missing, the confirmed
+        # V3 no-flow status codes remain a safe one-way fallback.
+        paddle = v3_flow["paddle"]
+        for mode, control, channel in (
+            (ph_mode_flow, v3_flow["ph_control"], "ph"),
+            (cl_mode_flow, v3_flow["cl_control"], "cl"),
+        ):
+            native_status = _v3_channel_flow_status(mode, paddle, control)
+            if native_status is None:
+                continue
+            if channel == "ph":
+                ph_dosing_flow_status = native_status
+            else:
+                cl_dosing_flow_status = native_status
         cl_shock_status = (
             _cl_shock_state(live)
             or _cl_shock_state(v3)
@@ -3460,6 +3684,11 @@ class SmartPoolConnectClient:
             capabilities.add("ph_dosing_flow")
         if self._cl_page_flow_detected and rx_settings.detected:
             capabilities.add("cl_dosing_flow")
+        if ph_mode_flow is not None and ph_mode_flow & 0x01:
+            capabilities.add("ph_dosing_flow")
+        if cl_mode_flow is not None and cl_mode_flow & 0x01:
+            capabilities.add("cl_dosing_flow")
+        capabilities.update(current_v3_diagnostic_capabilities)
 
         fs1 = filter_settings.schedule_1 or PoolFilterSchedule()
         fs2 = filter_settings.schedule_2 or PoolFilterSchedule()
@@ -3522,7 +3751,9 @@ class SmartPoolConnectClient:
         # Hardware capabilities do not disappear because one later refresh has
         # a temporary null runtime value. Keep everything once proven by a
         # module-specific contract.
-        capabilities.update(self._last_capabilities)
+        capabilities.update(
+            self._last_capabilities - V3_ONLY_DIAGNOSTIC_CAPABILITIES
+        )
         frozen_capabilities = frozenset(capabilities)
         self._last_capabilities = frozen_capabilities
 
@@ -3639,6 +3870,24 @@ class SmartPoolConnectClient:
             cl_shock_status=cl_shock_status,
             ph_dosing_flow_status=ph_dosing_flow_status,
             cl_dosing_flow_status=cl_dosing_flow_status,
+            v3_flow_paddle_status=(
+                "flow_ok"
+                if paddle is True
+                else "no_flow"
+                if paddle is False
+                else None
+            ),
+            v3_ph_control=v3_flow["ph_control"],
+            v3_cl_control=v3_flow["cl_control"],
+            carrier_version=v3_flow["carrier_version"],
+            filter_modbus_power=v3_diagnostics["filter_modbus_power"],
+            filter_modbus_status=v3_diagnostics["filter_modbus_status"],
+            filter_pump_error=v3_diagnostics["filter_pump_error"],
+            filter_pump_error_code=v3_diagnostics["filter_pump_error_code"],
+            ph_input_error=v3_diagnostics["ph_input_error"],
+            rx_input_error=v3_diagnostics["rx_input_error"],
+            tds_pollution=v3_diagnostics["tds_pollution"],
+            tds_salt=v3_diagnostics["tds_salt"],
             lighting_on=lighting_on,
             lighting_always_active=lighting_settings.always_active,
             lighting_cover_disabled=lighting_settings.cover_disabled,
