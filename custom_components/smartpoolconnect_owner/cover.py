@@ -9,41 +9,10 @@ from homeassistant.components.cover import (
     CoverEntityFeature,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SmartPoolConnectConfigEntry
-from .const import CONF_POOL_ID, DOMAIN
 from .entity import SmartPoolConnectEntity
-
-
-def _repair_integration_disabled_covco_cover(
-    hass: HomeAssistant,
-    entry: SmartPoolConnectConfigEntry,
-) -> None:
-    """Enable a validated Covco cover left disabled by an older release.
-
-    ``entity_registry_enabled_default`` applies only on first registration.
-    Older releases registered this same unique ID disabled, so changing the
-    default later cannot make the entity available. Only entries disabled by
-    the integration are repaired; an explicit user choice remains untouched.
-    """
-
-    status = entry.runtime_data.data
-    if status is None or "covco_cover" not in status.capabilities:
-        return
-
-    registry = er.async_get(hass)
-    unique_id = f"{entry.data[CONF_POOL_ID]}_cover"
-    entity_id = registry.async_get_entity_id("cover", DOMAIN, unique_id)
-    if entity_id is None:
-        return
-    registry_entry = registry.async_get(entity_id)
-    if (
-        registry_entry is not None
-        and registry_entry.disabled_by == er.RegistryEntryDisabler.INTEGRATION
-    ):
-        registry.async_update_entity(entity_id, disabled_by=None)
 
 
 async def async_setup_entry(
@@ -54,9 +23,10 @@ async def async_setup_entry(
     """Set up control only for a validated, write-capable cover."""
 
     status = entry.runtime_data.data
-    if status is None or "cover_control" not in status.capabilities:
+    if status is None or not {"covco_cover", "cover_control"}.intersection(
+        status.capabilities
+    ):
         return
-    _repair_integration_disabled_covco_cover(hass, entry)
     async_add_entities([PoolCover(entry.runtime_data)])
 
 

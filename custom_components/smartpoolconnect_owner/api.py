@@ -3663,10 +3663,14 @@ class SmartPoolConnectClient:
                 ("lighting", lighting_settings),
                 ("filter", filter_settings),
                 ("backwash", backwash_settings),
-                ("eco_valve", eco_valve_settings),
             )
             if settings.detected
         }
+        # Eco Valve route payloads can contain an empty/default configuration
+        # even when no physical valve is installed.  Only a complete, writable
+        # contract proves the capability and may create setting entities.
+        if eco_valve_settings.valid:
+            capabilities.add("eco_valve")
         # Settings entities can write to physical equipment. Expose those
         # capabilities only after the complete portal contract was validated.
         capabilities.update(
