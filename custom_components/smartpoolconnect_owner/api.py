@@ -752,34 +752,25 @@ def _lighting_runtime_capability(data: Any) -> bool:
 def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
     """Return proven Covco presence, position percentage, and endpoint state.
 
-    Capability detection requires the validated encoder endpoints and the
-    confirmed Open/Close/Stop command fields. ``current_location`` is runtime
-    telemetry and may legitimately be ``None`` during an early refresh; in
-    that case the module remains present while position/state stay unknown.
-    Intermediate ``position_state`` values are intentionally not interpreted
-    until captures for all states are available.
+    Calibrated, distinct encoder endpoints prove that a Covco cover is
+    installed. Runtime telemetry (including hysteresis and the momentary
+    command columns) may legitimately be absent during an early refresh and
+    must not suppress the capability or all cover entities.
+
+    Movement is derived from the confirmed active control state/direction and
+    from measured motor activity plus the wished endpoint. Undocumented
+    ``position_state`` enum values are deliberately not guessed.
     """
 
     values = _column_values(_find_data_block(data, "covco_data"))
     open_location = _as_finite_float(values.get("open_location"))
     close_location = _as_finite_float(values.get("close_location"))
     hysteresis = _as_finite_float(values.get("hys_location"))
-    command_fields = {
-        "automatic_movement_open",
-        "automatic_movement_close",
-        "automatic_movement_stop",
-    }
     if (
         open_location is None
         or close_location is None
-        or hysteresis is None
-        or hysteresis < 0
+        or (hysteresis is not None and hysteresis < 0)
         or math.isclose(open_location, close_location)
-        or not command_fields.issubset(values)
-        or any(
-            values[field] is not None and not isinstance(values[field], bool)
-            for field in command_fields
-        )
     ):
         return False, None, None
 
@@ -789,9 +780,24 @@ def _covco_telemetry(data: Any) -> tuple[bool, float | None, str | None]:
 
     span = open_location - close_location
     position = max(0.0, min(100.0, (current_location - close_location) / span * 100.0))
-    tolerance = min(hysteresis, abs(span) / 2)
+    tolerance = min(hysteresis or 0.0, abs(span) / 2)
     state = None
-    if abs(current_location - open_location) <= tolerance:
+    control_state = _as_int(values.get("control_state"))
+    control_direction = _as_int(values.get("control_direction"))
+    motor_power = _as_finite_float(values.get("motor_power_w")) or 0.0
+    motor_current = _as_finite_float(values.get("motor_current_a")) or 0.0
+    motor_ccr = _as_finite_float(values.get("ccr_motor")) or 0.0
+    wished_location = _as_finite_float(values.get("wished_location"))
+    motor_active = motor_power > 0.5 or motor_current > 0.05 or motor_ccr > 0
+
+    if control_state == 4 and control_direction in (0, 1):
+        state = "opening" if control_direction == 1 else "closing"
+    elif motor_active and wished_location is not None:
+        if abs(wished_location - open_location) <= tolerance:
+            state = "opening"
+        elif abs(wished_location - close_location) <= tolerance:
+            state = "closing"
+    elif abs(current_location - open_location) <= tolerance:
         state = "open"
     elif abs(current_location - close_location) <= tolerance:
         state = "closed"
