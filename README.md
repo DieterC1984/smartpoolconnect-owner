@@ -241,12 +241,6 @@ Depending on the controller:
 - Disable lighting when external/deck cover is closed
 - Disable lighting when internal/Covco cover is closed
 
-On compatible V3 controllers, lighting configuration is represented by a
-bitmask.
-
-SmartPoolConnect Owner uses read-modify-write handling so changing the lighting
-state does not overwrite unrelated lighting and cover settings.
-
 
 ### Controller Diagnostics
 
@@ -278,8 +272,6 @@ SmartPoolConnect Owner currently includes translations for:
 - Dutch
 - German
 
-On compatible V3 controllers, lighting configuration is represented by a bitmask. SmartPoolConnect Owner preserves unrelated lighting flags when changing the on/off state instead of overwriting the complete configuration.
-
 
 ## Multi-controller support
 
@@ -310,7 +302,7 @@ The goal is to support different SmartPoolConnect pool configurations without ta
 
 ### Installation with HACS
 
-1. Open HACS in Home Assistant.
+1. Open Marketplace in Home Assistant.
 2. Go to **Integrations**.
 3. Search for **SmartPoolConnect Owner**.
 4. Select **SmartPoolConnect Owner** and click **Download**.
@@ -318,22 +310,6 @@ The goal is to support different SmartPoolConnect pool configurations without ta
 6. Go to **Settings → Devices & services → Add integration**.
 7. Search for **SmartPoolConnect Owner**.
 8. Follow the setup instructions.
-
-
-### Custom repository installation
-
-If you want to install a beta, development or unreleased version:
-
-1. Open HACS in Home Assistant.
-2. Go to **Integrations**.
-3. Open the menu and choose **Custom repositories**.
-4. Add the SmartPoolConnect Owner GitHub repository URL.
-5. Set the category to **Integration**.
-6. Install **SmartPoolConnect Owner**.
-7. Select the desired release when testing a beta version.
-8. Restart Home Assistant.
-9. Go to **Settings → Devices & services → Add integration**.
-10. Search for **SmartPoolConnect Owner**.
 
 
 ### Manual installation
@@ -357,12 +333,10 @@ The integration is configured through the Home Assistant UI.
 
 You need:
 
-- SmartPoolConnect owner portal credentials
+- SmartPoolConnect owner portal credentials (e-mail and password)
 - The pool UUID used by the SmartPoolConnect owner portal
 
 Entity creation is based on the capabilities detected for that pool.
-
-This means two SmartPoolConnect installations can legitimately expose different sets of Home Assistant entities.
 
 
 ## Supported entities
@@ -401,15 +375,6 @@ Feedback is particularly welcome from users with:
 - Different filtration/pump configurations
 - Different dosing configurations
 - Different lighting and cover combinations
-
-When reporting controller differences, please include:
-
-- Controller/platform type
-- Integration version
-- Expected behaviour
-- Home Assistant behaviour
-- Relevant entity states
-- Sanitized API information if available
 
 Do **not** publish your pool UUID, credentials, authentication tokens, session cookies or other personal information.
 
