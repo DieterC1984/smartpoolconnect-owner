@@ -66,6 +66,7 @@ HISTORICAL_CACHE_INTERVAL: float = 60 * 60
 HISTORICAL_BACKFILL_WEEKS: int = 13
 HISTORICAL_ROUTE_ID = "pool/routes/$pid.historical"
 HISTORICAL_ROUTE_QUERY = "_routes=root%2Cpool%2Froutes%2F%24pid.historical"
+LIGHTING_ROUTE_QUERY = "_routes=root%2Cpool%2Froutes%2F%24pid.lighting"
 
 # Confirmed v3 ``lighting_config.enabled`` bitmask. Every update must use
 # read-modify-write so changing the physical light does not reset either cover
@@ -1908,10 +1909,12 @@ def _extract_devalue_lighting_settings(text: str, pool_id: str | None = None) ->
 
 
 def _extract_v3_lighting_settings(data: Any) -> PoolLightingSettings:
-    """Extract the v3 admin lighting contract and preserve its bitmask."""
+    """Extract the v3 lighting contract from flat or columnar route data."""
 
+    columns = _column_values(_find_data_block(data, "lighting_config"))
+    source = columns if columns else data
     config = _find_config_with_keys(
-        data,
+        source,
         {
             "enabled",
             "s1_hour_start",
@@ -2768,6 +2771,18 @@ class SmartPoolConnectClient:
                         )
                     self._pool_route_decoded = decoded
         return self._pool_route_decoded
+
+    async def _get_v3_lighting_route_settings(self) -> PoolLightingSettings:
+        """Read current V3 lighting settings from the dedicated portal route."""
+
+        text = await self._request_text_with_reauth(
+            "GET",
+            f"/pool/{self.pool_id}/lighting.data?{LIGHTING_ROUTE_QUERY}",
+        )
+        decoded = await asyncio.to_thread(_decode_route_response, text)
+        if decoded is None:
+            return PoolLightingSettings(source="v3")
+        return _extract_v3_lighting_settings(decoded)
 
     def restore_last_backwash(self, value: str | None) -> None:
         """Restore the persistent backwash cache maintained by the coordinator."""
@@ -4170,6 +4185,32 @@ class SmartPoolConnectClient:
         )
 
     async def async_set_lighting(self, on: bool) -> None:
+        """Set physical lighting through the V3 mask or unchanged legacy path."""
+
+        if {
+            "v3_lighting",
+            "lighting_v3",
+        }.intersection(self._last_capabilities):
+            current = await self._get_v3_lighting_route_settings()
+            enabled = current.enabled_mask
+            if enabled is None or enabled < 0:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because the current enabled bitmask is unavailable"
+                )
+            updated = (
+                enabled | LIGHTING_ON_BIT
+                if on
+                else enabled & ~LIGHTING_ON_BIT
+            )
+            await self._request_json(
+                "PATCH",
+                f"/api/admin-settings/{self.pool_id}/lighting_config",
+                json={"enabled": updated},
+                headers={"Content-Type": "application/json"},
+            )
+            self._invalidate_settings_cache()
+            return
+
         await self.async_set_lighting_settings(always_active=on)
 
     async def async_set_pump_speed(self, speed: str) -> None:

@@ -60,7 +60,7 @@ async def _commit_lighting(e, settings: PoolLightingSettings) -> None:
     )
 
 async def _set_lighting_always(e, v):
-    await e.coordinator.client.async_set_lighting_settings(always_active=v)
+    await e.coordinator.client.async_set_lighting(v)
 async def _set_lighting_cover_disabled(e, v):
     await e.coordinator.client.async_set_lighting_settings(cover_disabled=v)
 async def _set_lighting_internal_cover_disabled(e, v):
