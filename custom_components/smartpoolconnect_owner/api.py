@@ -3117,6 +3117,162 @@ class SmartPoolConnectClient:
         )
         return v3 if v3.detected else legacy
 
+    async def _async_set_v3_lighting_settings(
+        self,
+        *,
+        always_active: bool | None = None,
+        cover_disabled: bool | None = None,
+        internal_cover_disabled: bool | None = None,
+        schedule_enabled: bool | None = None,
+        schedule_start_time: str | None = None,
+        schedule_stop_time: str | None = None,
+        schedule_days: tuple[str, ...] | None = None,
+    ) -> bool:
+        """Patch only requested V3 lighting fields after field-local validation.
+
+        Physical-light and cover-option writes require only a fresh, reliable
+        ``enabled`` mask. Schedule writes independently require only the current
+        schedule field(s) they modify. No virtual mask or full-config validity
+        is used, and every unrequested field is preserved by omission.
+
+        Return ``False`` only when the V3 endpoint is absent on a controller not
+        already known as V3, allowing the unchanged legacy full-form path.
+        """
+
+        mask_requested = any(
+            requested is not None
+            for requested in (
+                always_active,
+                cover_disabled,
+                internal_cover_disabled,
+            )
+        )
+        data = await self._get_admin_config(
+            "lighting_config", force_refresh=True
+        )
+        if data is None:
+            if "lighting_v3" in getattr(
+                self, "_last_capabilities", frozenset()
+            ):
+                message = (
+                    "Lighting update aborted because the current enabled bitmask is unavailable"
+                    if mask_requested
+                    else "Lighting update aborted because the current V3 settings are unavailable"
+                )
+                raise SmartPoolConnectError(message)
+            return False
+
+        config = _find_config_with_keys(
+            data,
+            {
+                "enabled",
+                "s1_enabled",
+                "s1_hour_start",
+                "s1_min_start",
+                "s1_hour_stop",
+                "s1_min_stop",
+                "s1_days",
+            },
+        )
+        if config is None:
+            message = (
+                "Lighting update aborted because the current enabled bitmask is unavailable"
+                if mask_requested
+                else "Lighting update aborted because the requested V3 settings are unavailable"
+            )
+            raise SmartPoolConnectError(message)
+
+        payload: dict[str, Any] = {}
+        if mask_requested:
+            enabled = _as_int(config.get("enabled"))
+            if enabled is None or enabled < 0:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because the current enabled bitmask is unavailable"
+                )
+            for requested, bit in (
+                (always_active, LIGHTING_ON_BIT),
+                (cover_disabled, LIGHTING_EXTERNAL_COVER_BIT),
+                (internal_cover_disabled, LIGHTING_INTERNAL_COVER_BIT),
+            ):
+                if requested is True:
+                    enabled |= bit
+                elif requested is False:
+                    enabled &= ~bit
+            payload["enabled"] = enabled
+
+        if schedule_enabled is not None:
+            if _as_bool(config.get("s1_enabled")) is None:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because s1_enabled is unavailable"
+                )
+            payload["s1_enabled"] = schedule_enabled
+
+        if schedule_start_time is not None:
+            current_hour = _as_int(config.get("s1_hour_start"))
+            current_minute = _as_int(config.get("s1_min_start"))
+            if (
+                current_hour is None
+                or current_minute is None
+                or not 0 <= current_hour <= 23
+                or not 0 <= current_minute <= 59
+            ):
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because the current schedule start time is unavailable"
+                )
+            if _valid_time(schedule_start_time) is None:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because the schedule start time is invalid"
+                )
+            start_hour, start_minute = (
+                int(part) for part in schedule_start_time.split(":")
+            )
+            payload["s1_hour_start"] = start_hour
+            payload["s1_min_start"] = start_minute
+
+        if schedule_stop_time is not None:
+            current_hour = _as_int(config.get("s1_hour_stop"))
+            current_minute = _as_int(config.get("s1_min_stop"))
+            if (
+                current_hour is None
+                or current_minute is None
+                or not 0 <= current_hour <= 23
+                or not 0 <= current_minute <= 59
+            ):
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because the current schedule stop time is unavailable"
+                )
+            if _valid_time(schedule_stop_time) is None:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because the schedule stop time is invalid"
+                )
+            stop_hour, stop_minute = (
+                int(part) for part in schedule_stop_time.split(":")
+            )
+            payload["s1_hour_stop"] = stop_hour
+            payload["s1_min_stop"] = stop_minute
+
+        if schedule_days is not None:
+            if _days_from_mask(config.get("s1_days")) is None:
+                raise SmartPoolConnectError(
+                    "Lighting update aborted because s1_days is unavailable"
+                )
+            if any(day not in DAYS for day in schedule_days):
+                raise SmartPoolConnectError(
+                    "Lighting schedule contains an invalid weekday"
+                )
+            payload["s1_days"] = _days_to_mask(schedule_days)
+
+        if not payload:
+            return True
+        await self._request_json(
+            "PATCH",
+            f"/api/admin-settings/{self.pool_id}/lighting_config",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        self._invalidate_settings_cache()
+        return True
+
     async def async_set_lighting_settings(
         self,
         *,
@@ -3128,6 +3284,17 @@ class SmartPoolConnectClient:
         schedule_stop_time: str | None = None,
         schedule_days: tuple[str, ...] | None = None,
     ) -> None:
+        if await self._async_set_v3_lighting_settings(
+            always_active=always_active,
+            cover_disabled=cover_disabled,
+            internal_cover_disabled=internal_cover_disabled,
+            schedule_enabled=schedule_enabled,
+            schedule_start_time=schedule_start_time,
+            schedule_stop_time=schedule_stop_time,
+            schedule_days=schedule_days,
+        ):
+            return
+
         current = await self.async_get_lighting_settings(force_refresh=True)
         if not current.valid:
             raise SmartPoolConnectError(
