@@ -185,7 +185,7 @@ def _set_temperature_schedule_day(day: str):
     return setter
 
 SWITCHES: list[SmartPoolSwitchDescription] = [
-    SmartPoolSwitchDescription(key="lighting", translation_key="lighting", icon="mdi:lightbulb", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.lighting_always_active if s.lighting_always_active is not None else s.lighting_on, set_fn=_set_lighting_always),
+    SmartPoolSwitchDescription(key="lighting", translation_key="lighting", icon="mdi:lightbulb", device_class=SwitchDeviceClass.SWITCH, value_fn=lambda s: s.lighting_on if s.lighting_on is not None else s.lighting_always_active, set_fn=_set_lighting_always),
     SmartPoolSwitchDescription(key="lighting_cover_disabled", translation_key="lighting_cover_disabled", icon="mdi:window-shutter-alert", value_fn=lambda s: s.lighting_cover_disabled, set_fn=_set_lighting_cover_disabled),
     SmartPoolSwitchDescription(key="lighting_internal_cover_disabled", translation_key="lighting_internal_cover_disabled", icon="mdi:window-shutter-alert", value_fn=lambda s: s.lighting_internal_cover_disabled, set_fn=_set_lighting_internal_cover_disabled),
     SmartPoolSwitchDescription(key="lighting_schedule_enabled", translation_key="lighting_schedule_enabled", icon="mdi:calendar-clock", value_fn=lambda s: s.lighting_schedule_enabled, set_fn=_set_lighting_schedule_enabled),
