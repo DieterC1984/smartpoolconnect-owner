@@ -269,6 +269,34 @@
       },
       "tds_salt": {
         "name": "TDS salt"
+      },
+      "lighting_state": {
+        "name": "Lighting State",
+        "state": {
+          "off": "Off",
+          "on": "On"
+        }
+      },
+      "filter_operating_mode": {
+        "name": "Filter Operating Mode",
+        "state": {
+          "off": "Off",
+          "schedule_1": "Schedule 1",
+          "schedule_2": "Schedule 2",
+          "schedule_3": "Schedule 3",
+          "heating": "Heating",
+          "solar": "Solar",
+          "backwash": "Backwash",
+          "cooling": "Cooling",
+          "manual": "Manual",
+          "frost_protection": "Frost Protection",
+          "always_active": "Always Active",
+          "cover": "Cover",
+          "valve_error": "Valve Error",
+          "cover_low": "Cover Low",
+          "too_hot": "Too Hot",
+          "invalid": "Invalid"
+        }
       }
     },
     "button": {

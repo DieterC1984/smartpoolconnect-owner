@@ -36,6 +36,25 @@ CL_SHOCK_STATUS: dict[int, str] = {
     201: "waiting_for_pump",
     205: "active",
 }
+LIVE_LIGHTING_STATES: dict[int, str] = {0: "off", 2: "on"}
+FILTER_OPERATING_MODES: dict[int, str] = {
+    0: "off",
+    1: "schedule_1",
+    2: "schedule_2",
+    3: "schedule_3",
+    4: "heating",
+    5: "solar",
+    6: "backwash",
+    7: "cooling",
+    8: "manual",
+    9: "frost_protection",
+    10: "always_active",
+    11: "cover",
+    12: "valve_error",
+    13: "cover_low",
+    14: "too_hot",
+    15: "invalid",
+}
 _HTML_BADGE_PATTERN = re.compile(
     r'<span\b[^>]*\bdata-slot=["\']badge["\'][^>]*>(.*?)</span>',
     re.IGNORECASE | re.DOTALL,
@@ -160,6 +179,7 @@ class PoolStatus:
     tds_pollution: float | None = None
     tds_salt: float | None = None
     lighting_on: bool | None = None
+    lighting_state: str | None = None
     lighting_always_active: bool | None = None
     lighting_cover_disabled: bool | None = None
     lighting_internal_cover_disabled: bool | None = None
@@ -217,6 +237,7 @@ class PoolStatus:
     solar_temperature: float | None = None
     pump_speed: str | None = None
     pump_status: bool | None = None
+    filter_operating_mode: str | None = None
     heating_on: bool | None = None
     cover_state: str | None = None
     cover_protection: bool | None = None
@@ -460,6 +481,33 @@ def _find_key(obj: Any, names: set[str]) -> Any:
             if found is not None:
                 return found
     return None
+
+
+def _find_present_key(obj: Any, name: str) -> tuple[bool, Any]:
+    """Return presence and value for one semantic live-status field."""
+
+    if isinstance(obj, dict):
+        if name in obj:
+            return True, obj[name]
+        for value in obj.values():
+            present, found = _find_present_key(value, name)
+            if present:
+                return True, found
+    elif isinstance(obj, list):
+        for value in obj:
+            present, found = _find_present_key(value, name)
+            if present:
+                return True, found
+    return False, None
+
+
+def _live_status_enum(
+    data: Any, name: str, mapping: dict[int, str]
+) -> tuple[bool, str | None]:
+    """Map one present live-status code without inferring missing fields."""
+
+    present, raw = _find_present_key(data, name)
+    return present, mapping.get(_as_int(raw)) if present else None
 
 
 def _find_config_with_keys(obj: Any, keys: set[str]) -> dict[str, Any] | None:
@@ -3948,6 +3996,14 @@ class SmartPoolConnectClient:
         phnix_valid, phnix = _phnix_telemetry_with_fallback(v3, live)
         v3_pump_status, v3_pump_speed = _v3_filter_telemetry(v3)
         v3_lighting = _v3_lighting_state(v3)
+        live_lighting_present, lighting_state = _live_status_enum(
+            live, "lighting", LIVE_LIGHTING_STATES
+        )
+        live_pump_mode_present, filter_operating_mode = _live_status_enum(
+            live, "pump_status", FILTER_OPERATING_MODES
+        )
+        _, live_lighting_value = _find_present_key(live, "lighting")
+        _, live_pump_status_value = _find_present_key(live, "pump_status")
         backwash_runtime_detected = any(
             _backwash_runtime_capability(source)
             for source in (v3, live, pool_route)
@@ -3973,6 +4029,10 @@ class SmartPoolConnectClient:
             capabilities.add("lighting_v3")
         if lighting_runtime_detected:
             capabilities.add("v3_lighting")
+        if live_lighting_present:
+            capabilities.add("live_lighting_state")
+        if live_pump_mode_present:
+            capabilities.add("live_filter_operating_mode")
 
         raw_dosing_durations = (
             ph_settings.dosing_time,
@@ -4024,7 +4084,7 @@ class SmartPoolConnectClient:
             water_temperature = analogue["water_temperature"]
 
         live_pump_status = (
-            _find_key(live, {"pump_status"}) if live is not None else None
+            live_pump_status_value if live_pump_mode_present else None
         )
         live_pump_speed = _pump_speed(
             _find_key(live, {"pump_speed"}) if live is not None else None
@@ -4036,7 +4096,7 @@ class SmartPoolConnectClient:
         )
         pump_speed = live_pump_speed or v3_pump_speed
 
-        live_lighting = _find_key(live, {"lighting"}) if live is not None else None
+        live_lighting = live_lighting_value if live_lighting_present else None
         lighting_on = (
             v3_lighting
             if v3_lighting is not None
@@ -4128,6 +4188,7 @@ class SmartPoolConnectClient:
             tds_pollution=v3_diagnostics["tds_pollution"],
             tds_salt=v3_diagnostics["tds_salt"],
             lighting_on=lighting_on,
+            lighting_state=lighting_state,
             lighting_always_active=lighting_settings.always_active,
             lighting_cover_disabled=lighting_settings.cover_disabled,
             lighting_internal_cover_disabled=lighting_settings.internal_cover_disabled,
@@ -4200,6 +4261,7 @@ class SmartPoolConnectClient:
             ),
             pump_speed=pump_speed,
             pump_status=pump_status,
+            filter_operating_mode=filter_operating_mode,
             heating_on=heating_on,
             cover_state=standard_cover_state or covco_state,
             cover_protection=cover_settings.protection,
