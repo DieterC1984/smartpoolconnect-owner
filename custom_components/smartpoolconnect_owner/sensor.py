@@ -63,7 +63,7 @@ SENSORS = (
         translation_key="pump_speed",
         icon="mdi:pump",
         device_class=SensorDeviceClass.ENUM,
-        options=["off", "low", "medium", "high", "maximum"],
+        options=["off", "min", "low", "medium", "high", "maximum"],
         value_fn=lambda s: s.pump_speed,
     ),
     SmartPoolSensorDescription(

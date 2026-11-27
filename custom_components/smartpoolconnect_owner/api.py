@@ -1056,11 +1056,12 @@ def _v3_diagnostic_capabilities(
 
 
 def _v3_filter_telemetry(data: Any) -> tuple[bool | None, str | None]:
-    """Return pump state and the isolated practical raw V3 speed mapping.
+    """Return physical state and finalized raw V3 pump speed.
 
-    This mapping applies only to raw V3 ``filter_data.actual`` semantics and is
-    intentionally separate from the normalized V1/V2/public-API enum. Values 0,
-    2 and 3 are confirmed; 1, 4 and 5 are provisional pending hardware tests.
+    Raw V3 ``filter_data.actual`` is the primary displayed speed and is distinct
+    from the normalized V1/V2/public-API enum. GPIO flags are fallback evidence
+    only when the raw value is unavailable; contradictory flags never override a
+    valid raw 0-5 value.
     """
 
     raw_speed_map = {
@@ -1077,49 +1078,33 @@ def _v3_filter_telemetry(data: Any) -> tuple[bool | None, str | None]:
     pump_output = gpio.get("pump")
     pump_status = pump_output if isinstance(pump_output, bool) else None
 
-    # speed_1 is not a reliable Min discriminator: retained Nexus II fixtures
-    # show it active alongside raw 2 and 3. Only flags with consistent retained
-    # semantics participate in validation/preference.
+    if actual is not None:
+        numeric_speed = raw_speed_map.get(actual)
+        if numeric_speed is None:
+            return pump_status, None
+        # Raw actual is the primary displayed speed. Keep pump output as the
+        # separate physical running/off signal; auxiliary output state must not
+        # turn a valid raw 1-5 speed (especially 5=Maximum) into another value.
+        if actual == 0:
+            return False, "off"
+        return True if pump_status is None else pump_status, numeric_speed
+
+    # Fallback only when actual is unavailable. speed_1 is excluded because
+    # retained fixtures show it active alongside other speeds; speed_2/3/4 have
+    # unambiguous Low/Medium/High semantics when exactly one is active.
     flag_map = {
         "speed_2": "low",
         "speed_3": "medium",
         "speed_4": "high",
     }
     flag_values = {name: gpio.get(name) for name in flag_map}
-    flags_available = all(isinstance(value, bool) for value in flag_values.values())
-    active_flag_speeds = [
-        flag_map[name] for name, value in flag_values.items() if value is True
-    ]
-    flagged_speed = active_flag_speeds[0] if len(active_flag_speeds) == 1 else None
-
-    # A separately confirmed OFF output remains authoritative, including when a
-    # stale raw value or speed flag is still present.
+    if all(isinstance(value, bool) for value in flag_values.values()):
+        active = [flag_map[name] for name, value in flag_values.items() if value]
+        if len(active) == 1:
+            return True, active[0]
     if pump_status is False:
         return False, "off"
-
-    if actual is None:
-        if flags_available and flagged_speed is not None:
-            return True, flagged_speed
-        return pump_status, None
-
-    numeric_speed = raw_speed_map.get(actual)
-    if numeric_speed is None:
-        # Raw values outside 0-5 are unsupported regardless of GPIO flags.
-        return pump_status, None
-
-    if actual == 0:
-        # 0=Off is confirmed, but a contradictory active pump output is surfaced
-        # as running with unknown speed rather than silently choosing either side.
-        return (False, "off") if pump_status is not True else (True, None)
-
-    if flags_available and active_flag_speeds:
-        # Prefer one explicit flag only when it agrees with the numeric raw value.
-        # Multiple or mismatching flags are contradictory and remain Unknown.
-        if flagged_speed == numeric_speed:
-            return True, flagged_speed
-        return True if pump_status is None else pump_status, None
-
-    return True if pump_status is None else pump_status, numeric_speed
+    return pump_status, None
 
 
 def _v3_lighting_state(data: Any) -> bool | None:
@@ -1128,15 +1113,16 @@ def _v3_lighting_state(data: Any) -> bool | None:
     values = _column_values(_find_data_block(data, "lighting_data"))
     control = _as_int(values.get("control"))
     if control in (0, 1):
-        # Exact OFF/ON captures prove control=1 is OFF and control=0 is ON.
-        return control == 0
+        # Real beta.8 hardware feedback confirms the practical controller state:
+        # control=1 is ON and control=0 is OFF.
+        return control == 1
 
-    # GPIO is accepted only when both independently exposed active-low outputs
-    # are Boolean and agree. A lone or contradictory GPIO value is not guessed.
+    # GPIO is accepted only when both independently exposed outputs are Boolean
+    # and agree. Hardware feedback confirms true=ON and false=OFF in practice.
     gpio_a = _column_values(_find_data_block(data, "gpio_a_data")).get("light")
     gpio_o = _column_values(_find_data_block(data, "gpio_o_data")).get("light")
     if isinstance(gpio_a, bool) and isinstance(gpio_o, bool) and gpio_a == gpio_o:
-        return not gpio_a
+        return gpio_a
     return None
 
 
