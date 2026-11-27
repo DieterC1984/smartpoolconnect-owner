@@ -269,6 +269,34 @@
       },
       "tds_salt": {
         "name": "TDS-zout"
+      },
+      "lighting_state": {
+        "name": "Verlichtingsstatus",
+        "state": {
+          "off": "Uit",
+          "on": "Aan"
+        }
+      },
+      "filter_operating_mode": {
+        "name": "Filterbedrijfsmodus",
+        "state": {
+          "off": "Uit",
+          "schedule_1": "Schema 1",
+          "schedule_2": "Schema 2",
+          "schedule_3": "Schema 3",
+          "heating": "Verwarming",
+          "solar": "Solar",
+          "backwash": "Terugspoelen",
+          "cooling": "Koeling",
+          "manual": "Handmatig",
+          "frost_protection": "Vorstbeveiliging",
+          "always_active": "Altijd actief",
+          "cover": "Afdekking",
+          "valve_error": "Klepfout",
+          "cover_low": "Afdekking lage snelheid",
+          "too_hot": "Te warm",
+          "invalid": "Ongeldig"
+        }
       }
     },
     "button": {

@@ -269,6 +269,34 @@
       },
       "tds_salt": {
         "name": "TDS-Salz"
+      },
+      "lighting_state": {
+        "name": "Beleuchtungsstatus",
+        "state": {
+          "off": "Aus",
+          "on": "Ein"
+        }
+      },
+      "filter_operating_mode": {
+        "name": "Filterbetriebsmodus",
+        "state": {
+          "off": "Aus",
+          "schedule_1": "Zeitplan 1",
+          "schedule_2": "Zeitplan 2",
+          "schedule_3": "Zeitplan 3",
+          "heating": "Heizung",
+          "solar": "Solar",
+          "backwash": "Rückspülung",
+          "cooling": "Kühlung",
+          "manual": "Manuell",
+          "frost_protection": "Frostschutz",
+          "always_active": "Immer aktiv",
+          "cover": "Abdeckung",
+          "valve_error": "Ventilfehler",
+          "cover_low": "Abdeckung niedrige Geschwindigkeit",
+          "too_hot": "Zu heiß",
+          "invalid": "Ungültig"
+        }
       }
     },
     "button": {
