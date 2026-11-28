@@ -189,6 +189,7 @@
         "name": "Pump speed",
         "state": {
           "off": "Off",
+          "min": "Min",
           "low": "Low",
           "medium": "Medium",
           "high": "High",

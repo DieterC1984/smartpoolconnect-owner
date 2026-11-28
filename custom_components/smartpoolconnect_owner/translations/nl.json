@@ -189,6 +189,7 @@
         "name": "Pompsnelheid",
         "state": {
           "off": "Uit",
+          "min": "Minimum",
           "low": "Laag",
           "medium": "Gemiddeld",
           "high": "Hoog",

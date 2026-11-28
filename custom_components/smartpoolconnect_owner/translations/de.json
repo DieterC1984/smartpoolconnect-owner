@@ -189,6 +189,7 @@
         "name": "Pumpengeschwindigkeit",
         "state": {
           "off": "Aus",
+          "min": "Minimum",
           "low": "Niedrig",
           "medium": "Mittel",
           "high": "Hoch",
