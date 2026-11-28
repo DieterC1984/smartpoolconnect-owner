@@ -43,6 +43,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartPoolConnectConfigEn
     coordinator = SmartPoolConnectCoordinator(hass, client, entry)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
+    # One first refresh publishes Nexus status and activity from one request.
+    await coordinator.nexus.async_config_entry_first_refresh()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

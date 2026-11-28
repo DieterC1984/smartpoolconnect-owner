@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import (
 
 from .api import (
     AuthenticationError,
+    NexusPoolRouteStatus,
     PoolStatus,
     SmartPoolConnectClient,
     SmartPoolConnectError,
@@ -25,6 +26,27 @@ from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 _HISTORICAL_STORAGE_VERSION = 1
+
+
+NEXUS_SCAN_INTERVAL = 60
+
+
+class NexusCoordinator(DataUpdateCoordinator[NexusPoolRouteStatus]):
+    """Shared 60-second pool-route coordinator for Nexus diagnostics."""
+
+    def __init__(self, hass, client, entry) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_nexus",
+            update_interval=timedelta(seconds=NEXUS_SCAN_INTERVAL),
+        )
+        self.client = client
+        self.entry = entry
+
+    async def _async_update_data(self) -> NexusPoolRouteStatus:
+        # One bounded request supplies both ``status`` and ``activity_at``.
+        return await self.client.async_get_nexus_pool_route_status()
 
 
 class SmartPoolConnectCoordinator(DataUpdateCoordinator[PoolStatus]):
@@ -44,6 +66,7 @@ class SmartPoolConnectCoordinator(DataUpdateCoordinator[PoolStatus]):
         )
         self.client = client
         self.entry = entry
+        self.nexus = NexusCoordinator(hass, client, entry)
         self._last_good_data: PoolStatus | None = None
         self._historical_store = Store[dict[str, str]](
             hass,

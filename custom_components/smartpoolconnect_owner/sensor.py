@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -15,13 +16,16 @@ from homeassistant.components.sensor import (
 from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import SmartPoolConnectConfigEntry
 from .api import PoolStatus
-from .const import CONF_POOL_ID, DOMAIN
+from .const import CONF_POOL_ID, DOMAIN, MANUFACTURER
+from .coordinator import NexusCoordinator
 from .entity import SmartPoolConnectEntity
 
 
@@ -539,11 +543,43 @@ async def async_setup_entry(
     """Set up SmartPool sensors."""
 
     _repair_legacy_firmware_names(hass, entry)
-    async_add_entities(
+    entities = [
         SmartPoolSensor(entry.runtime_data, description)
         for description in SENSORS
         if _is_supported(entry.runtime_data.data, description)
-    )
+    ]
+    nexus_coordinator = entry.runtime_data.nexus
+    entities.append(NexusLastDataReceivedSensor(nexus_coordinator))
+    async_add_entities(entities)
+
+
+class NexusLastDataReceivedSensor(
+    CoordinatorEntity[NexusCoordinator], SensorEntity
+):
+    """Timestamp reported by SmartPoolConnect as controller ``activity_at``."""
+
+    _attr_has_entity_name = False
+    _attr_name = "Nexus last data received"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: NexusCoordinator) -> None:
+        super().__init__(coordinator)
+        pool_id = coordinator.entry.data[CONF_POOL_ID]
+        self._attr_unique_id = f"{pool_id}_nexus_last_data_received"
+        main_status = coordinator.entry.runtime_data.data
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, pool_id)},
+            name=(main_status.name if main_status else None)
+            or f"SmartPoolConnect {pool_id}",
+            manufacturer=MANUFACTURER,
+            model="Owner Portal",
+            configuration_url=f"https://www.smartpoolconnect.eu/pool/{pool_id}",
+        )
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self.coordinator.data.activity_at
 
 
 class SmartPoolSensor(SmartPoolConnectEntity, SensorEntity):

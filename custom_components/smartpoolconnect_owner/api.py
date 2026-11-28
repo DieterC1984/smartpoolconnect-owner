@@ -294,6 +294,14 @@ class PoolHistoricalStatus:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class NexusPoolRouteStatus:
+    """Current pool indicator and last controller activity from pool route."""
+
+    status: str | None = None
+    activity_at: datetime | None = None
+
+
 @dataclass(slots=True)
 class PoolPhSettings:
     target: float | None = None
@@ -2450,6 +2458,27 @@ def _normalize_smartpool_date(value: str | None) -> str | None:
     return value
 
 
+def _extract_nexus_pool_route_status(
+    decoded: Any,
+    pool_id: str,
+    cached_activity: datetime | None = None,
+) -> NexusPoolRouteStatus:
+    """Extract proven pool ``status`` and ``activity_at`` fields."""
+
+    pool = _find_pool_record(decoded, pool_id)
+    if not isinstance(pool, dict):
+        return NexusPoolRouteStatus(None, cached_activity)
+    raw_status = pool.get("status")
+    status = (
+        raw_status.strip().lower()
+        if isinstance(raw_status, str)
+        and raw_status.strip().lower() in {"online", "offline", "maintenance"}
+        else None
+    )
+    activity_at = _as_utc_datetime(pool.get("activity_at")) or cached_activity
+    return NexusPoolRouteStatus(status, activity_at)
+
+
 class SmartPoolConnectClient:
     """Client for SmartPoolConnect owner portal."""
 
@@ -2493,6 +2522,8 @@ class SmartPoolConnectClient:
         self._historical_backfill_complete = False
         self._historical_status = PoolHistoricalStatus()
         self._historical_lock = asyncio.Lock()
+        self._nexus_pool_cache = NexusPoolRouteStatus()
+        self._nexus_pool_task: asyncio.Task[NexusPoolRouteStatus] | None = None
 
     async def close(self) -> None:
         await self._session.close()
@@ -2748,6 +2779,48 @@ class SmartPoolConnectClient:
                 f"GET {path} returned a non-object JSON response"
             )
         return decoded, None
+
+    async def _async_fetch_nexus_pool_route(self) -> NexusPoolRouteStatus:
+        """Read pool ``status`` and ``activity_at`` from the proven pool route."""
+
+        cached_activity = self._nexus_pool_cache.activity_at
+        try:
+            text = await self._request_text_with_reauth(
+                "GET", f"/pool/{self.pool_id}.data"
+            )
+            # Bound the shared 60-second parser to the same established pool
+            # document ceiling used elsewhere in this client.
+            if len(text.encode("utf-8")) > _MAX_POOL_DOCUMENT_SCAN_BYTES:
+                result = NexusPoolRouteStatus(None, cached_activity)
+                self._nexus_pool_cache = result
+                return result
+            decoded = await asyncio.to_thread(_decode_route_response, text)
+        except Exception:
+            _LOGGER.debug(
+                "Could not refresh Nexus pool route status", exc_info=True
+            )
+            result = NexusPoolRouteStatus(None, cached_activity)
+            self._nexus_pool_cache = result
+            return result
+
+        result = _extract_nexus_pool_route_status(
+            decoded, self.pool_id, cached_activity
+        )
+        self._nexus_pool_cache = result
+        return result
+
+    async def async_get_nexus_pool_route_status(self) -> NexusPoolRouteStatus:
+        """Return one shared in-flight pool route status request."""
+
+        task = self._nexus_pool_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._async_fetch_nexus_pool_route())
+            self._nexus_pool_task = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._nexus_pool_task is task:
+                self._nexus_pool_task = None
 
     async def _get_live_sources(
         self,
